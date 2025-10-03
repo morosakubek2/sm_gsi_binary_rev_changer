@@ -3,7 +3,8 @@
 # build-gsi.sh - Modified to include flexible binary rev change for Samsung firmware
 # Original: https://gist.githubusercontent.com/sandorex/031c006cc9f705c3640bad8d5b9d66d2/raw/9d20da4905d01eb2d98686199d3c32d9800f486c/build-gsi.sh
 # Added: Binary rev change for non-system partitions in super.img and other images (e.g., boot.img, vbmeta.img)
-# Improved: Dynamic device_size and partition detection, optional GSI input, sudo for all privileged commands
+# Added: Support for decompressing .xz GSI images
+# Improved: Dynamic device_size and partition detection, enhanced mount error handling, sudo for all privileged commands
 
 set -e
 
@@ -35,6 +36,7 @@ F2FSCK=fsck.f2fs
 AVBTOOL=avbtool
 PYTHON3=python3
 TAR=tar
+XZ=xz
 
 # Cleanup function
 cleanup() {
@@ -52,7 +54,7 @@ usage() {
     echo "  -l, --system-lz4    Use system lz4 instead of bundled"
     echo "  -v, --verbose       Verbose output"
     echo "  -r, --rev <value>   Change binary revision (e.g., 0x0F)"
-    echo "  -g, --gsi <file>    Optional GSI image to replace system.img"
+    echo "  -g, --gsi <file>    Optional GSI image to replace system.img (supports .xz)"
     echo "  -h, --help          Show this help"
     echo "Input: AP_*.tar.md5 file containing super.img.lz4, boot.img, vbmeta.img, etc."
     exit 1
@@ -114,6 +116,7 @@ check_tool "fsck.f2fs" "$F2FSCK"
 check_tool "avbtool" "$AVBTOOL"
 check_tool "python3" "$PYTHON3"
 check_tool "tar" "$TAR"
+check_tool "xz" "$XZ"
 
 # Check loop module
 if ! lsmod | grep -q loop; then
@@ -122,6 +125,12 @@ if ! lsmod | grep -q loop; then
         echo "Error: Failed to load loop module. Run 'sudo modprobe loop' manually."
         exit 1
     }
+fi
+
+# Check loop devices
+if ! ls /dev/loop* &>/dev/null; then
+    echo "Error: No loop devices found. Check kernel configuration."
+    exit 1
 fi
 
 # Binary rev change function (Python-based)
@@ -203,8 +212,20 @@ sudo $LPUNPACK "$TEMP_DIR/super.img" "$super_dir"
 
 # Replace system.img with GSI if provided
 if [ -n "$GSI_IMAGE" ] && [ -f "$GSI_IMAGE" ]; then
-    vprint "Replacing system.img with provided GSI: $GSI_IMAGE"
-    sudo cp "$GSI_IMAGE" "$super_dir/system.img"
+    vprint "Processing GSI image: $GSI_IMAGE"
+    gsi_temp="$TEMP_DIR/system_gsi.img"
+    if [[ "$GSI_IMAGE" == *.xz ]]; then
+        vprint "Decompressing GSI image ($GSI_IMAGE) with xz"
+        sudo $XZ -d -k "$GSI_IMAGE" -c > "$gsi_temp" || {
+            echo "Error: Failed to decompress $GSI_IMAGE with xz"
+            exit 1
+        }
+    else
+        cp "$GSI_IMAGE" "$gsi_temp"
+    fi
+    sudo chmod 666 "$gsi_temp"
+    vprint "Replacing system.img with GSI"
+    sudo cp "$gsi_temp" "$super_dir/system.img"
 fi
 
 # Process partitions, skip system.img for rev change (GSI)
@@ -212,6 +233,22 @@ partitions=($(find "$super_dir" -name "*.img" -exec basename {} \; | grep -v "sy
 for part in "${partitions[@]}"; do
     part_img="$super_dir/$part.img"
     vprint "Processing $part_img"
+    # Fix permissions
+    sudo chmod 666 "$part_img"
+    # Check filesystem type and repair
+    if file "$part_img" | grep -q "ext4"; then
+        vprint "Running e2fsck on $part_img (ext4)"
+        sudo $E2FSCK -f -y "$part_img" || {
+            echo "Warning: e2fsck failed for $part_img, attempting to continue."
+        }
+    elif file "$part_img" | grep -q "f2fs"; then
+        vprint "Running fsck.f2fs on $part_img (f2fs)"
+        sudo $F2FSCK -f -y "$part_img" || {
+            echo "Warning: fsck.f2fs failed for $part_img, attempting to continue."
+        }
+    else
+        echo "Warning: Unknown filesystem for $part_img, skipping fsck."
+    fi
     # Apply binary rev change if requested
     if [ -n "$REV" ]; then
         change_binary_rev "$part_img" "$REV"
@@ -220,16 +257,17 @@ for part in "${partitions[@]}"; do
     mount_dir="$TEMP_DIR/mount_$part"
     mkdir -p "$mount_dir"
     sudo mount -o loop,rw "$part_img" "$mount_dir" || {
-        echo "Error: Failed to mount $part_img. Check permissions or loop module."
+        echo "Error: Failed to mount $part_img. Check permissions, loop devices, or filesystem integrity."
+        echo "Try running: sudo modprobe loop && sudo chmod 666 /dev/loop*"
         exit 1
     }
     vprint "Applying modifications to $part"
     sudo rm -rf "$mount_dir/product/app"/* || true
     sudo umount "$mount_dir" || {
-        echo "Error: Failed to unmount $part_img. Check permissions."
+        echo "Error: Failed to unmount $part_img. Check if mountpoint is busy."
         exit 1
     }
-    sudo $E2FSCK -f -y "$part_img"
+    sudo $E2FSCK -f -y "$part_img" || true
     sudo $RESIZE2FS -M "$part_img"
 done
 
@@ -237,19 +275,36 @@ done
 system_img="$super_dir/system.img"
 if [ -f "$system_img" ]; then
     vprint "Processing system.img (GSI, no rev change)"
+    # Fix permissions
+    sudo chmod 666 "$system_img"
+    # Check filesystem type and repair
+    if file "$system_img" | grep -q "ext4"; then
+        vprint "Running e2fsck on $system_img (ext4)"
+        sudo $E2FSCK -f -y "$system_img" || {
+            echo "Warning: e2fsck failed for $system_img, attempting to continue."
+        }
+    elif file "$system_img" | grep -q "f2fs"; then
+        vprint "Running fsck.f2fs on $system_img (f2fs)"
+        sudo $F2FSCK -f -y "$system_img" || {
+            echo "Warning: fsck.f2fs failed for $system_img, attempting to continue."
+        }
+    else
+        echo "Warning: Unknown filesystem for $system_img, skipping fsck."
+    fi
     mount_dir="$TEMP_DIR/mount_system"
     mkdir -p "$mount_dir"
     sudo mount -o loop,rw "$system_img" "$mount_dir" || {
-        echo "Error: Failed to mount $system_img. Check permissions or loop module."
+        echo "Error: Failed to mount $system_img. Check permissions, loop devices, or filesystem integrity."
+        echo "Try running: sudo modprobe loop && sudo chmod 666 /dev/loop*"
         exit 1
     }
     vprint "Applying GSI modifications to system"
     sudo rm -rf "$mount_dir/product/app"/* || true
     sudo umount "$mount_dir" || {
-        echo "Error: Failed to unmount $system_img. Check permissions."
+        echo "Error: Failed to unmount $system_img. Check if mountpoint is busy."
         exit 1
     }
-    sudo $E2FSCK -f -y "$system_img"
+    sudo $E2FSCK -f -y "$system_img" || true
     sudo $RESIZE2FS -M "$system_img"
 fi
 
@@ -295,6 +350,7 @@ tar_images=$(find "$tar_dir" -name "*.img" ! -name "super.img")
 for img in $tar_images; do
     img_name=$(basename "$img")
     vprint "Processing $img_name"
+    sudo chmod 666 "$img"
     if [ -n "$REV" ]; then
         change_binary_rev "$img" "$REV"
     fi
