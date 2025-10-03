@@ -4,8 +4,8 @@
 # Original: https://gist.githubusercontent.com/sandorex/031c006cc9f705c3640bad8d5b9d66d2/raw/9d20da4905d01eb2d98686199d3c32d9800f486c/build-gsi.sh
 # Added: Binary rev change for non-system partitions in super.img and other images (e.g., boot.img, vbmeta.img)
 # Added: Support for decompressing .xz GSI images
-# Added: Support for ext4 and f2fs; skips mounting for unknown filesystems (e.g., erofs)
-# Improved: Dynamic device_size and partition detection, enhanced filesystem and mount error handling, sudo for all privileged commands
+# Improved: Maintains original sandorex behavior (no mounting, minimal processing), adds resource checks
+# Improved: Dynamic device_size and partition detection, sudo for all privileged commands
 
 set -e
 
@@ -28,13 +28,6 @@ LZ4=lz4
 SIMG2IMG=simg2img
 LPUNPACK=lpunpack
 LPMAKE=lpmake
-E2FSCK=e2fsck
-RESIZE2FS=resize2fs
-MKE2FS=mke2fs
-SLOAD_F2FS=sload.f2fs
-MAKE_F2FS=make_f2fs
-F2FSCK=fsck.f2fs
-RESIZE_F2FS=resize.f2fs
 AVBTOOL=avbtool
 PYTHON3=python3
 TAR=tar
@@ -109,19 +102,12 @@ check_tool "lz4" "$LZ4"
 check_tool "simg2img" "$SIMG2IMG"
 check_tool "lpunpack" "$LPUNPACK"
 check_tool "lpmake" "$LPMAKE"
-check_tool "e2fsck" "$E2FSCK"
-check_tool "resize2fs" "$RESIZE2FS"
-check_tool "mke2fs" "$MKE2FS"
-check_tool "sload.f2fs" "$SLOAD_F2FS"
-check_tool "make_f2fs" "$MAKE_F2FS"
-check_tool "fsck.f2fs" "$F2FSCK"
-check_tool "resize.f2fs" "$RESIZE_F2FS"
 check_tool "avbtool" "$AVBTOOL"
 check_tool "python3" "$PYTHON3"
 check_tool "tar" "$TAR"
 check_tool "xz" "$XZ"
 
-# Check loop module
+# Check loop module (for unpacking)
 if ! lsmod | grep -q loop; then
     vprint "Loading loop module"
     sudo modprobe loop || {
@@ -134,14 +120,6 @@ fi
 if ! ls /dev/loop* &>/dev/null; then
     echo "Error: No loop devices found. Check kernel configuration."
     exit 1
-fi
-
-# Check f2fs module
-if ! lsmod | grep -q f2fs; then
-    vprint "Loading f2fs module"
-    sudo modprobe f2fs || {
-        echo "Warning: Failed to load f2fs module. f2fs partitions may not be supported."
-    }
 fi
 
 # Check system resources
@@ -216,7 +194,7 @@ vprint "Decompressing $super_lz4"
 sudo $LZ4 -d "$super_lz4" "$TEMP_DIR/super.img"
 
 # Check if super.img is sparse
-if file "$TEMP_DIR/super.img" | grep -o "Android sparse image"; then
+if file "$TEMP_DIR/super.img" | grep -q "Android sparse image"; then
     vprint "Converting sparse super.img to raw"
     raw_super="$TEMP_DIR/super_raw.img"
     sudo $SIMG2IMG "$TEMP_DIR/super.img" "$raw_super"
@@ -254,99 +232,18 @@ for part in "${partitions[@]}"; do
     vprint "Processing $part_img"
     # Fix permissions
     sudo chmod 666 "$part_img"
-    # Check filesystem type
-    fs_type=$(file "$part_img" | grep -o "ext4\|f2fs" || true)
     # Apply binary rev change if requested
     if [ -n "$REV" ]; then
         change_binary_rev "$part_img" "$REV"
     fi
-    # Skip mounting if filesystem is unknown
-    if [ -z "$fs_type" ]; then
-        vprint "Unknown filesystem for $part_img, skipping mount and modifications"
-        continue
-    fi
-    # Repair filesystem
-    if [ "$fs_type" = "ext4" ]; then
-        vprint "Running e2fsck on $part_img (ext4)"
-        sudo $E2FSCK -f -y "$part_img" || {
-            echo "Warning: e2fsck failed for $part_img, attempting to continue."
-        }
-    elif [ "$fs_type" = "f2fs" ]; then
-        vprint "Running fsck.f2fs on $part_img (f2fs)"
-        sudo $F2FSCK -f -y "$part_img" || {
-            echo "Warning: fsck.f2fs failed for $part_img, attempting to continue."
-        }
-    fi
-    # Mount and modify for GSI
-    mount_dir="$TEMP_DIR/mount_$part"
-    mkdir -p "$mount_dir"
-    sudo mount -o loop,rw "$part_img" "$mount_dir" || {
-        echo "Error: Failed to mount $part_img. Check permissions, loop devices, or filesystem integrity."
-        echo "Try running: sudo modprobe loop && sudo modprobe f2fs && sudo chmod 666 /dev/loop*"
-        exit 1
-    }
-    vprint "Applying modifications to $part"
-    sudo rm -rf "$mount_dir/product/app"/* || true
-    sudo umount "$mount_dir" || {
-        echo "Error: Failed to unmount $part_img. Check if mountpoint is busy."
-        exit 1
-    }
-    # Resize filesystem
-    if [ "$fs_type" = "ext4" ]; then
-        sudo $E2FSCK -f -y "$part_img" || true
-        sudo $RESIZE2FS -M "$part_img" || true
-    elif [ "$fs_type" = "f2fs" ]; then
-        sudo $F2FSCK -f -y "$part_img" || true
-        sudo $RESIZE_F2FS "$part_img" || true
-    fi
 done
 
-# Process system.img for GSI (no rev change)
+# Process system.img (no rev change, no modifications)
 system_img="$super_dir/system.img"
 if [ -f "$system_img" ]; then
     vprint "Processing system.img (GSI, no rev change)"
     # Fix permissions
     sudo chmod 666 "$system_img"
-    # Check filesystem type
-    fs_type=$(file "$system_img" | grep -o "ext4\|f2fs" || true)
-    if [ -z "$fs_type" ]; then
-        vprint "Unknown filesystem for $system_img, skipping mount and modifications"
-    else
-        # Repair filesystem
-        if [ "$fs_type" = "ext4" ]; then
-            vprint "Running e2fsck on $system_img (ext4)"
-            sudo $E2FSCK -f -y "$system_img" || {
-                echo "Warning: e2fsck failed for $system_img, attempting to continue."
-            }
-        elif [ "$fs_type" = "f2fs" ]; then
-            vprint "Running fsck.f2fs on $system_img (f2fs)"
-            sudo $F2FSCK -f -y "$system_img" || {
-                echo "Warning: fsck.f2fs failed for $system_img, attempting to continue."
-            }
-        fi
-        # Mount and modify for GSI
-        mount_dir="$TEMP_DIR/mount_system"
-        mkdir -p "$mount_dir"
-        sudo mount -o loop,rw "$system_img" "$mount_dir" || {
-            echo "Error: Failed to mount $system_img. Check permissions, loop devices, or filesystem integrity."
-            echo "Try running: sudo modprobe loop && sudo modprobe f2fs && sudo chmod 666 /dev/loop*"
-            exit 1
-        }
-        vprint "Applying GSI modifications to system"
-        sudo rm -rf "$mount_dir/product/app"/* || true
-        sudo umount "$mount_dir" || {
-            echo "Error: Failed to unmount $system_img. Check if mountpoint is busy."
-            exit 1
-        }
-        # Resize filesystem
-        if [ "$fs_type" = "ext4" ]; then
-            sudo $E2FSCK -f -y "$system_img" || true
-            sudo $RESIZE2FS -M "$system_img" || true
-        elif [ "$fs_type" = "f2fs" ]; then
-            sudo $F2FSCK -f -y "$system_img" || true
-            sudo $RESIZE_F2FS "$system_img" || true
-        fi
-    fi
 fi
 
 # Calculate device_size dynamically
