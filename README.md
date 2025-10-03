@@ -28,7 +28,7 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
   - Source AP package (e.g., `AP_*.tar.md5` for OneUI 6.1, Android 14, SW REV 11) from [samfw.com](https://samfw.com/firmware/SM-F711B).
   - Optional: GSI image (e.g., `system.img`) for replacement.
 - **Device**: Samsung Galaxy Z Flip 3 with unlocked bootloader.
-- **Permissions**: Root access for `mount`, `umount`, and other commands (use `-s/--sudo` if needed).
+- **Permissions**: Root access required for `mount`, `umount`, and other commands (script uses `sudo` automatically).
 
 ## Installation
 1. Install dependencies on Artix Linux:
@@ -60,21 +60,25 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
 
 2. **Run the script**:
    ```bash
-   ./build-gsi.sh -r <target_rev> -v [-g gsi_image] <input_tar> [output_dir]
+   ./build-gsi.sh [options] <input_tar> [output_dir]
    ```
+   - `-k/--keep-files`: Keep temporary files (default: delete).
+   - `-v/--verbose`: Enable verbose output for debugging.
    - `-r <target_rev>`: Target binary revision (e.g., `0x0F` for SW REV 15, `0x0B` for SW REV 11).
-   - `-v`: Enable verbose output for debugging.
    - `-g <gsi_image>`: Optional GSI image to replace `system.img`.
-   - `-s/--sudo`: Use sudo for commands requiring root (e.g., mount).
    - `<input_tar>`: Input `AP_*.tar.md5` file.
    - `[output_dir]`: Output directory (default: `./out`).
-   Example (with GSI and sudo):
+   Example (with GSI):
    ```bash
-   ./build-gsi.sh -s -r 0x0F -v -g system_gsi.img AP_F711BXXU6EWK1.tar.md5 out
+   ./build-gsi.sh -r 0x0F -v -g system_gsi.img AP_F711BXXU6EWK1.tar.md5 out
    ```
    Example (without GSI):
    ```bash
-   ./build-gsi.sh -s -r 0x0F -v AP_F711BXXU6EWK1.tar.md5 out
+   ./build-gsi.sh -r 0x0F -v AP_F711BXXU6EWK1.tar.md5 out
+   ```
+   Example (keep temporary files):
+   ```bash
+   ./build-gsi.sh -k -r 0x0F -v AP_F711BXXU6EWK1.tar.md5 out
    ```
 
 3. **Output**:
@@ -101,10 +105,11 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
    - Enter Download Mode (Vol Down + Power, connect USB, press Vol Up) and flash.
 
 ## Notes
-- **Permissions**: Use `-s/--sudo` if you encounter mount errors. Ensure the loop module is loaded:
+- **Permissions**: The script uses `sudo` for commands requiring root (e.g., `mount`, `umount`). Ensure your user has sudo privileges:
   ```bash
-  sudo modprobe loop
+  sudo -l
   ```
+- **Temporary Files**: Use `-k/--keep-files` to preserve temporary files in `/tmp` for debugging. Default: files are deleted.
 - **Partitions**: Dynamically detects all partitions in `super.img` (e.g., `vendor`, `product`, `odm`). Check after unpacking:
   ```bash
   ls out/super
@@ -119,7 +124,7 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
 - **XDA Support**: Check [XDA forums](https://xdaforums.com) for Flip 3-specific issues (search "Flip 3 downgrade GSI rev").
 
 ## Troubleshooting
-- **Mount errors**: Run with `-s/--sudo` and ensure the loop module is loaded (`sudo modprobe loop`). Check verbose logs (`-v`) for details.
+- **Mount errors**: Ensure the loop module is loaded (`sudo modprobe loop`) and your user has sudo privileges. Check verbose logs (`-v`) for details.
 - **Tool errors**: Ensure all dependencies are installed. If `android-tools` is missing, build from AUR or AOSP source.
 - **Model string not found**: Provide the full firmware string (e.g., `SM-F711BXXU6EWK1`) when prompted or hardcode in the script.
 - **Repack errors**: Verify partition sizes (`ls -l out/super/*.img`) and ensure sufficient disk space.
