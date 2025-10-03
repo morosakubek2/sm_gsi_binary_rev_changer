@@ -2,7 +2,7 @@
 
 # build-gsi.sh - Modified to include flexible binary rev change for Samsung firmware
 # Original: https://gist.githubusercontent.com/sandorex/031c006cc9f705c3640bad8d5b9d66d2/raw/9d20da4905d01eb2d98686199d3c32d9800f486c/build-gsi.sh
-# Added: Binary rev change for non-system partitions and external images (e.g., boot.img, vbmeta.img)
+# Added: Binary rev change for non-system partitions in super.img and other images (e.g., boot.img, vbmeta.img)
 
 set -e
 
@@ -12,7 +12,6 @@ USE_SUDO=""
 USE_SYSTEM_LZ4=0
 VERBOSE=0
 REV=""
-EXTRA_IMAGES=()
 
 # Directories
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
@@ -34,6 +33,7 @@ MAKE_F2FS=make_f2fs
 F2FSCK=fsck.f2fs
 AVBTOOL=avbtool
 PYTHON3=python3
+TAR=tar
 
 # Cleanup function
 cleanup() {
@@ -45,7 +45,7 @@ cleanup() {
 trap cleanup EXIT
 
 usage() {
-    echo "Usage: $0 [options] <input> [output] [extra_images...]"
+    echo "Usage: $0 [options] <input_tar> [output_dir]"
     echo "Options:"
     echo "  -k, --keep-files    Keep temporary files"
     echo "  -s, --sudo          Use sudo for commands"
@@ -53,7 +53,7 @@ usage() {
     echo "  -v, --verbose       Verbose output"
     echo "  -r, --rev <value>   Change binary revision (e.g., 0x0F)"
     echo "  -h, --help          Show this help"
-    echo "Extra images: Additional images like boot.img, vbmeta.img to process"
+    echo "Input: AP_*.tar.md5 file containing super.img.lz4, boot.img, vbmeta.img, etc."
     exit 1
 }
 
@@ -73,12 +73,10 @@ done
 
 INPUT="$1"
 OUTPUT="${2:-$OUTDIR}"
-shift 2
-EXTRA_IMAGES=("$@")  # Capture extra images (e.g., boot.img, vbmeta.img)
 
 # Check input
-if [ -z "$INPUT" ]; then
-    echo "Error: Input file required"
+if [ -z "$INPUT" ] || [[ ! "$INPUT" == *.tar.md5 ]]; then
+    echo "Error: Input must be a .tar.md5 file (e.g., AP_*.tar.md5)"
     usage
 fi
 
@@ -114,6 +112,7 @@ check_tool "make_f2fs" "$MAKE_F2FS"
 check_tool "fsck.f2fs" "$F2FSCK"
 check_tool "avbtool" "$AVBTOOL"
 check_tool "python3" "$PYTHON3"
+check_tool "tar" "$TAR"
 
 # Binary rev change function (Python-based)
 change_binary_rev() {
@@ -162,129 +161,65 @@ if __name__ == "__main__":
 EOF
 }
 
-# Check if input is lz4
-if [[ "$INPUT" == *.lz4 ]]; then
-    vprint "Decompressing $INPUT"
-    $USE_SUDO $LZ4 -d "$INPUT" "${INPUT%.lz4}"
-    INPUT="${INPUT%.lz4}"
+# Extract AP tar
+vprint "Extracting $INPUT"
+tar_dir="$TEMP_DIR/tar"
+mkdir -p "$tar_dir"
+$USE_SUDO $TAR -xvf "$INPUT" -C "$tar_dir"
+
+# Process super.img.lz4
+super_lz4=$(find "$tar_dir" -name "super.img.lz4")
+if [ -z "$super_lz4" ]; then
+    echo "Error: super.img.lz4 not found in $INPUT"
+    exit 1
 fi
 
-# Check if input is sparse
-if file "$INPUT" | grep -q "Android sparse image"; then
-    vprint "Converting sparse image $INPUT to raw"
-    raw_image="$TEMP_DIR/$(basename "$INPUT")_raw.img"
-    $USE_SUDO $SIMG2IMG "$INPUT" "$raw_image"
-    INPUT="$raw_image"
+vprint "Decompressing $super_lz4"
+$USE_SUDO $LZ4 -d "$super_lz4" "$TEMP_DIR/super.img"
+
+# Check if super.img is sparse
+if file "$TEMP_DIR/super.img" | grep -q "Android sparse image"; then
+    vprint "Converting sparse super.img to raw"
+    raw_super="$TEMP_DIR/super_raw.img"
+    $USE_SUDO $SIMG2IMG "$TEMP_DIR/super.img" "$raw_super"
+    mv "$raw_super" "$TEMP_DIR/super.img"
 fi
 
-# Check if input is super.img
-if [[ "$(basename "$INPUT")" == super*.img ]]; then
-    vprint "Unpacking super image $INPUT"
-    super_dir="$TEMP_DIR/super"
-    mkdir -p "$super_dir"
-    $USE_SUDO $LPUNPACK "$INPUT" "$super_dir"
+# Unpack super.img
+vprint "Unpacking super image"
+super_dir="$TEMP_DIR/super"
+mkdir -p "$super_dir"
+$USE_SUDO $LPUNPACK "$TEMP_DIR/super.img" "$super_dir"
 
-    # Process each partition, skip system.img for rev change (GSI)
-    partitions=("vendor" "product" "odm" "system_ext")  # Excluded system
-    for part in "${partitions[@]}"; do
-        part_img="$super_dir/$part.img"
-        if [ -f "$part_img" ]; then
-            vprint "Processing $part_img"
-            # Apply binary rev change if requested
-            if [ -n "$REV" ]; then
-                change_binary_rev "$part_img" "$REV"
-            fi
-            # Mount and modify (original logic, e.g., for GSI)
-            mount_dir="$TEMP_DIR/mount_$part"
-            mkdir -p "$mount_dir"
-            $USE_SUDO mount -o loop,rw "$part_img" "$mount_dir"
-            vprint "Applying modifications to $part"
-            $USE_SUDO rm -rf "$mount_dir/product/app"/* || true
-            $USE_SUDO umount "$mount_dir"
-            $USE_SUDO $E2FSCK -f -y "$part_img"
-            $USE_SUDO $RESIZE2FS -M "$part_img"
+# Process partitions, skip system.img for rev change (GSI)
+partitions=("vendor" "product" "odm" "system_ext")
+for part in "${partitions[@]}"; do
+    part_img="$super_dir/$part.img"
+    if [ -f "$part_img" ]; then
+        vprint "Processing $part_img"
+        # Apply binary rev change if requested
+        if [ -n "$REV" ]; then
+            change_binary_rev "$part_img" "$REV"
         fi
-    done
-
-    # Process system.img for GSI (no rev change)
-    system_img="$super_dir/system.img"
-    if [ -f "$system_img" ]; then
-        vprint "Processing system.img (GSI, no rev change)"
-        mount_dir="$TEMP_DIR/mount_system"
+        # Mount and modify for GSI
+        mount_dir="$TEMP_DIR/mount_$part"
         mkdir -p "$mount_dir"
-        $USE_SUDO mount -o loop,rw "$system_img" "$mount_dir"
-        vprint "Applying GSI modifications to system"
+        $USE_SUDO mount -o loop,rw "$part_img" "$mount_dir"
+        vprint "Applying modifications to $part"
         $USE_SUDO rm -rf "$mount_dir/product/app"/* || true
         $USE_SUDO umount "$mount_dir"
-        $USE_SUDO $E2FSCK -f -y "$system_img"
-        $USE_SUDO $RESIZE2FS -M "$system_img"
-    fi
-
-    # Repack super.img
-    vprint "Repacking super image"
-    output_super="$OUTPUT/super.img"
-    device_size="9126805504"  # Adjust for Flip 3 (check with heimdall print-pit)
-    lpmake_args=(
-        "--metadata-size" "65536"
-        "--super-name" "super"
-        "--device" "super:$device_size"
-        "--group" "main:$device_size"
-    )
-    all_partitions=("system" "${partitions[@]}")
-    for part in "${all_partitions[@]}"; do
-        part_img="$super_dir/$part.img"
-        if [ -f "$part_img" ]; then
-            size=$(stat -f %z "$part_img")
-            lpmake_args+=("--partition" "$part:readonly:$size:main" "--image" "$part=$part_img")
-        fi
-    done
-    lpmake_args+=("--output" "$output_super")
-    $USE_SUDO $LPMAKE "${lpmake_args[@]}"
-
-    # Compress super.img to LZ4
-    vprint "Compressing super.img to LZ4"
-    $USE_SUDO $LZ4 "$output_super" "$OUTPUT/super.img.lz4"
-else
-    # Single image (e.g., boot.img, vbmeta.img)
-    vprint "Processing single image $INPUT"
-    if [ -n "$REV" ]; then
-        change_binary_rev "$INPUT" "$REV"
-    fi
-    # Compress to LZ4 if needed
-    $USE_SUDO $LZ4 "$INPUT" "$OUTPUT/$(basename "$INPUT").lz4"
-fi
-
-# Process extra images (e.g., boot.img, vbmeta.img)
-for extra_img in "${EXTRA_IMAGES[@]}"; do
-    if [ -f "$extra_img" ]; then
-        vprint "Processing extra image $extra_img"
-        if [ -n "$REV" ]; then
-            change_binary_rev "$extra_img" "$REV"
-        fi
-        $USE_SUDO $LZ4 "$extra_img" "$OUTPUT/$(basename "$extra_img").lz4"
+        $USE_SUDO $E2FSCK -f -y "$part_img"
+        $USE_SUDO $RESIZE2FS -M "$part_img"
     fi
 done
 
-# Generate vbmeta if needed
-vprint "Generating vbmeta"
-vbmeta_img="$OUTPUT/vbmeta.img"
-$USE_SUDO $AVBTOOL make_vbmeta_image --flag 2 --padding_size 4096 --output "$vbmeta_img"
-if [ -n "$REV" ]; then
-    change_binary_rev "$vbmeta_img" "$REV"
-fi
-$USE_SUDO $LZ4 "$vbmeta_img" "$OUTPUT/vbmeta.img.lz4"
-
-# Create AP package
-vprint "Creating AP package"
-ap_tar="$OUTPUT/AP_modified.tar"
-tar_files=("$OUTPUT/super.img.lz4" "$OUTPUT/vbmeta.img.lz4")
-for extra_img in "${EXTRA_IMAGES[@]}"; do
-    lz4_img="$OUTPUT/$(basename "$extra_img").lz4"
-    if [ -f "$lz4_img" ]; then
-        tar_files+=("$lz4_img")
-    fi
-done
-$USE_SUDO tar -cvf "$ap_tar" -C "$OUTPUT" "${tar_files[@]#$OUTPUT/}"
-
-echo "[*] Done! AP package created at $ap_tar"
-exit 0
+# Process system.img for GSI (no rev change)
+system_img="$super_dir/system.img"
+if [ -f "$system_img" ]; then
+    vprint "Processing system.img (GSI, no rev change)"
+    mount_dir="$TEMP_DIR/mount_system"
+    mkdir -p "$mount_dir"
+    $USE_SUDO mount -o loop,rw "$system_img" "$mount_dir"
+    vprint "Applying GSI modifications to system"
+    $USE_SUDO rm -rf "$mount_dir/product/app"/* || true
+    $USE_S
