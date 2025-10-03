@@ -3,7 +3,7 @@
 # build-gsi.sh - Modified to include flexible binary rev change for Samsung firmware
 # Original: https://gist.githubusercontent.com/sandorex/031c006cc9f705c3640bad8d5b9d66d2/raw/9d20da4905d01eb2d98686199d3c32d9800f486c/build-gsi.sh
 # Added: Binary rev change for non-system partitions in super.img and other images (e.g., boot.img, vbmeta.img)
-# Improved: Dynamic device_size calculation based on partition sizes
+# Improved: Dynamic device_size and partition detection, optional GSI input
 
 set -e
 
@@ -13,6 +13,7 @@ USE_SUDO=""
 USE_SYSTEM_LZ4=0
 VERBOSE=0
 REV=""
+GSI_IMAGE=""
 
 # Directories
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
@@ -53,6 +54,7 @@ usage() {
     echo "  -l, --system-lz4    Use system lz4 instead of bundled"
     echo "  -v, --verbose       Verbose output"
     echo "  -r, --rev <value>   Change binary revision (e.g., 0x0F)"
+    echo "  -g, --gsi <file>    Optional GSI image to replace system.img"
     echo "  -h, --help          Show this help"
     echo "Input: AP_*.tar.md5 file containing super.img.lz4, boot.img, vbmeta.img, etc."
     exit 1
@@ -66,6 +68,7 @@ while [ $# -gt 0 ]; do
         -l|--system-lz4) USE_SYSTEM_LZ4=1 ;;
         -v|--verbose) VERBOSE=1 ;;
         -r|--rev) REV="$2"; shift ;;
+        -g|--gsi) GSI_IMAGE="$2"; shift ;;
         -h|--help) usage ;;
         *) break ;;
     esac
@@ -192,26 +195,30 @@ super_dir="$TEMP_DIR/super"
 mkdir -p "$super_dir"
 $USE_SUDO $LPUNPACK "$TEMP_DIR/super.img" "$super_dir"
 
+# Replace system.img with GSI if provided
+if [ -n "$GSI_IMAGE" ] && [ -f "$GSI_IMAGE" ]; then
+    vprint "Replacing system.img with provided GSI: $GSI_IMAGE"
+    $USE_SUDO cp "$GSI_IMAGE" "$super_dir/system.img"
+fi
+
 # Process partitions, skip system.img for rev change (GSI)
-partitions=("vendor" "product" "odm" "system_ext")
+partitions=($(find "$super_dir" -name "*.img" -exec basename {} \; | grep -v "system.img" | sed 's/\.img$//'))
 for part in "${partitions[@]}"; do
     part_img="$super_dir/$part.img"
-    if [ -f "$part_img" ]; then
-        vprint "Processing $part_img"
-        # Apply binary rev change if requested
-        if [ -n "$REV" ]; then
-            change_binary_rev "$part_img" "$REV"
-        fi
-        # Mount and modify for GSI
-        mount_dir="$TEMP_DIR/mount_$part"
-        mkdir -p "$mount_dir"
-        $USE_SUDO mount -o loop,rw "$part_img" "$mount_dir"
-        vprint "Applying modifications to $part"
-        $USE_SUDO rm -rf "$mount_dir/product/app"/* || true
-        $USE_SUDO umount "$mount_dir"
-        $USE_SUDO $E2FSCK -f -y "$part_img"
-        $USE_SUDO $RESIZE2FS -M "$part_img"
+    vprint "Processing $part_img"
+    # Apply binary rev change if requested
+    if [ -n "$REV" ]; then
+        change_binary_rev "$part_img" "$REV"
     fi
+    # Mount and modify for GSI
+    mount_dir="$TEMP_DIR/mount_$part"
+    mkdir -p "$mount_dir"
+    $USE_SUDO mount -o loop,rw "$part_img" "$mount_dir"
+    vprint "Applying modifications to $part"
+    $USE_SUDO rm -rf "$mount_dir/product/app"/* || true
+    $USE_SUDO umount "$mount_dir"
+    $USE_SUDO $E2FSCK -f -y "$part_img"
+    $USE_SUDO $RESIZE2FS -M "$part_img"
 done
 
 # Process system.img for GSI (no rev change)
@@ -231,7 +238,7 @@ fi
 # Calculate device_size dynamically
 vprint "Calculating device_size for super.img"
 device_size=0
-all_partitions=("system" "${partitions[@]}")
+all_partitions=($(find "$super_dir" -name "*.img" -exec basename {} \; | sed 's/\.img$//'))
 for part in "${all_partitions[@]}"; do
     part_img="$super_dir/$part.img"
     if [ -f "$part_img" ]; then
