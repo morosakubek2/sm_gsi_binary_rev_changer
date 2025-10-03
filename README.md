@@ -1,4 +1,4 @@
-# Samsung Firmware GSI Builder with Binary Revision Change
+# Samsung Firmware GSI Builder with Binary Revision Changer
 
 This script (`build-gsi.sh`) generates a modified AP package for Samsung devices, enabling downgrade or installation of a Generic System Image (GSI) with customizable binary revision (SW REV) changes. It is tailored for devices like the Samsung Galaxy Z Flip 3 (SM-F711B/U/N), allowing users to modify firmware images (e.g., `super.img`, `boot.img`, `vbmeta.img`) to match the bootloader's SW REV (e.g., from 11/0x0B to 15/0x0F) while supporting GSI for the system partition.
 
@@ -28,6 +28,7 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
   - Source AP package (e.g., `AP_*.tar.md5` for OneUI 6.1, Android 14, SW REV 11) from [samfw.com](https://samfw.com/firmware/SM-F711B).
   - Optional: GSI image (e.g., `system.img`) for replacement.
 - **Device**: Samsung Galaxy Z Flip 3 with unlocked bootloader.
+- **Permissions**: Root access for `mount`, `umount`, and other commands (use `-s/--sudo` if needed).
 
 ## Installation
 1. Install dependencies on Artix Linux:
@@ -40,12 +41,16 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
    ```
 2. Clone this repository:
    ```bash
-   git clone https://github.com/your-username/samsung-gsi-builder.git
-   cd samsung-gsi-builder
+   git clone https://github.com/morosakubek2/sm_gsi_binary_rev_changer.git
+   cd sm_gsi_binary_rev_changer
    ```
 3. Make the script executable:
    ```bash
    chmod +x build-gsi.sh
+   ```
+4. Ensure loop module is loaded (required for mounting):
+   ```bash
+   sudo modprobe loop
    ```
 
 ## Usage
@@ -60,15 +65,16 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
    - `-r <target_rev>`: Target binary revision (e.g., `0x0F` for SW REV 15, `0x0B` for SW REV 11).
    - `-v`: Enable verbose output for debugging.
    - `-g <gsi_image>`: Optional GSI image to replace `system.img`.
+   - `-s/--sudo`: Use sudo for commands requiring root (e.g., mount).
    - `<input_tar>`: Input `AP_*.tar.md5` file.
    - `[output_dir]`: Output directory (default: `./out`).
-   Example (with GSI):
+   Example (with GSI and sudo):
    ```bash
-   ./build-gsi.sh -r 0x0F -v -g system_gsi.img AP_F711BXXU6EWK1.tar.md5 out
+   ./build-gsi.sh -s -r 0x0F -v -g system_gsi.img AP_F711BXXU6EWK1.tar.md5 out
    ```
    Example (without GSI):
    ```bash
-   ./build-gsi.sh -r 0x0F -v AP_F711BXXU6EWK1.tar.md5 out
+   ./build-gsi.sh -s -r 0x0F -v AP_F711BXXU6EWK1.tar.md5 out
    ```
 
 3. **Output**:
@@ -95,6 +101,10 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
    - Enter Download Mode (Vol Down + Power, connect USB, press Vol Up) and flash.
 
 ## Notes
+- **Permissions**: Use `-s/--sudo` if you encounter mount errors. Ensure the loop module is loaded:
+  ```bash
+  sudo modprobe loop
+  ```
 - **Partitions**: Dynamically detects all partitions in `super.img` (e.g., `vendor`, `product`, `odm`). Check after unpacking:
   ```bash
   ls out/super
@@ -109,10 +119,16 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
 - **XDA Support**: Check [XDA forums](https://xdaforums.com) for Flip 3-specific issues (search "Flip 3 downgrade GSI rev").
 
 ## Troubleshooting
+- **Mount errors**: Run with `-s/--sudo` and ensure the loop module is loaded (`sudo modprobe loop`). Check verbose logs (`-v`) for details.
 - **Tool errors**: Ensure all dependencies are installed. If `android-tools` is missing, build from AUR or AOSP source.
 - **Model string not found**: Provide the full firmware string (e.g., `SM-F711BXXU6EWK1`) when prompted or hardcode in the script.
 - **Repack errors**: Verify partition sizes (`ls -l out/super/*.img`) and ensure sufficient disk space.
 - **Verbose logs**: Use `-v` for detailed output. Share full logs for support.
 
 ## Credits
-- Original `build-gsi.sh`: [sandorex](https://gist.github.com/sandorex/031c006cc9f705c3640bad8d
+- Original `build-gsi.sh`: [sandorex](https://gist.github.com/sandorex/031c006cc9f705c3640bad8d5b9d66d2)
+- Binary rev change logic: [BotchedRPR/binary-rev-change](https://github.com/BotchedRPR/binary-rev-change)
+- Adapted for Artix Linux and Flip 3 by [morosakubek2](https://github.com/morosakubek2).
+
+## License
+MIT License. See [LICENSE](LICENSE) for details.
