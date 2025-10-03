@@ -3,7 +3,7 @@
 # build-gsi.sh - Modified to include flexible binary rev change for Samsung firmware
 # Original: https://gist.githubusercontent.com/sandorex/031c006cc9f705c3640bad8d5b9d66d2/raw/9d20da4905d01eb2d98686199d3c32d9800f486c/build-gsi.sh
 # Added: Binary rev change for non-system partitions in super.img and other images (e.g., boot.img, vbmeta.img)
-# Improved: Dynamic device_size and partition detection, optional GSI input
+# Improved: Dynamic device_size and partition detection, optional GSI input, fixed sudo for mount/umount
 
 set -e
 
@@ -118,6 +118,15 @@ check_tool "avbtool" "$AVBTOOL"
 check_tool "python3" "$PYTHON3"
 check_tool "tar" "$TAR"
 
+# Check loop module
+if ! lsmod | grep -q loop; then
+    vprint "Loading loop module"
+    $USE_SUDO modprobe loop || {
+        echo "Error: Failed to load loop module. Run 'sudo modprobe loop' manually."
+        exit 1
+    }
+fi
+
 # Binary rev change function (Python-based)
 change_binary_rev() {
     local img_path=$1
@@ -213,10 +222,16 @@ for part in "${partitions[@]}"; do
     # Mount and modify for GSI
     mount_dir="$TEMP_DIR/mount_$part"
     mkdir -p "$mount_dir"
-    $USE_SUDO mount -o loop,rw "$part_img" "$mount_dir"
+    $USE_SUDO mount -o loop,rw "$part_img" "$mount_dir" || {
+        echo "Error: Failed to mount $part_img. Check permissions or run with -s/--sudo."
+        exit 1
+    }
     vprint "Applying modifications to $part"
     $USE_SUDO rm -rf "$mount_dir/product/app"/* || true
-    $USE_SUDO umount "$mount_dir"
+    $USE_SUDO umount "$mount_dir" || {
+        echo "Error: Failed to unmount $part_img. Check permissions or run with -s/--sudo."
+        exit 1
+    }
     $USE_SUDO $E2FSCK -f -y "$part_img"
     $USE_SUDO $RESIZE2FS -M "$part_img"
 done
@@ -227,10 +242,16 @@ if [ -f "$system_img" ]; then
     vprint "Processing system.img (GSI, no rev change)"
     mount_dir="$TEMP_DIR/mount_system"
     mkdir -p "$mount_dir"
-    $USE_SUDO mount -o loop,rw "$system_img" "$mount_dir"
+    $USE_SUDO mount -o loop,rw "$system_img" "$mount_dir" || {
+        echo "Error: Failed to mount $system_img. Check permissions or run with -s/--sudo."
+        exit 1
+    }
     vprint "Applying GSI modifications to system"
     $USE_SUDO rm -rf "$mount_dir/product/app"/* || true
-    $USE_SUDO umount "$mount_dir"
+    $USE_SUDO umount "$mount_dir" || {
+        echo "Error: Failed to unmount $system_img. Check permissions or run with -s/--sudo."
+        exit 1
+    }
     $USE_SUDO $E2FSCK -f -y "$system_img"
     $USE_SUDO $RESIZE2FS -M "$system_img"
 fi
