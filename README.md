@@ -5,10 +5,11 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
 **Warning**: Modifying firmware can brick your device or cause data loss. Always back up data (photos, files, Google/Samsung accounts) before proceeding. Use at your own risk.
 
 ## Features
-- Processes `AP_*.tar.md5` automatically, extracting and handling `super.img.lz4`, `boot.img`, `vbmeta.img`, etc.
+- Automatically processes `AP_*.tar.md5`, extracting and handling `super.img.lz4`, `boot.img`, `vbmeta.img`, etc.
 - Changes binary revision (SW REV) for non-system partitions (`vendor`, `product`, `odm`, `system_ext`) and other images (e.g., `boot.img`, `vbmeta.img`) to any user-specified value.
 - Skips SW REV change for `system.img` when using GSI.
 - Supports sparse images (`simg2img`) and LZ4 compression.
+- Dynamically calculates `super.img` size based on partition sizes, eliminating manual configuration.
 - Generates `AP_modified.tar` for flashing with Odin.
 - Compatible with Artix Linux (Arch-based) and other Linux distributions.
 
@@ -49,7 +50,7 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
 ## Usage
 1. **Prepare firmware**:
    - Download the target AP package (e.g., `AP_*.tar.md5` for OneUI 6.1, Android 14, SW REV 11) from [samfw.com](https://samfw.com/firmware/SM-F711B).
-   - Optional: Place a GSI image as `system.img` in the same directory if replacing the stock system.
+   - Optional: Place a GSI image as `system.img` in the same directory to replace the stock system.
 
 2. **Run the script**:
    ```bash
@@ -88,16 +89,12 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
    - Enter Download Mode (Vol Down + Power, connect USB, press Vol Up) and flash.
 
 ## Notes
-- **Super Partition Size**: Default is `9126805504` bytes (Flip 3 256GB). Verify with:
-  ```bash
-  sudo heimdall print-pit > pit.txt
-  ```
-  Update `device_size` in the script if different.
+- **Super Partition Size**: Automatically calculated based on partition sizes, no manual configuration needed.
 - **Partitions**: Processes `vendor`, `product`, `odm`, `system_ext` for rev changes, skipping `system` (GSI). Check partitions after unpacking:
   ```bash
   ls out/super
   ```
-  Add others (e.g., `opproduct`) to the `partitions` array if needed.
+  Add others (e.g., `opproduct`) to the `partitions` array in the script if needed.
 - **Model String**: If the script cannot find the model string (e.g., `SM-F711B`), it will prompt for manual input. Hardcode it in `change_binary_rev` for automation.
 - **GSI**: `system.img` is assumed to be a GSI and skipped for rev changes. For stock Samsung `system.img`, edit the script to include it in rev modification.
 - **Resources**:
@@ -108,7 +105,7 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
 ## Troubleshooting
 - **Tool errors**: Ensure all dependencies are installed. If `android-tools` is missing, build from AUR or AOSP source.
 - **Model string not found**: Provide the full firmware string (e.g., `SM-F711BXXU6EWK1`) when prompted or hardcode in the script.
-- **Repack errors**: Verify partition sizes (`ls -l out/super/*.img`) match `device_size`. Adjust `lpmake` arguments if needed.
+- **Repack errors**: Verify partition sizes (`ls -l out/super/*.img`) and ensure sufficient disk space.
 - **Verbose logs**: Use `-v` for detailed output. Share full logs for support.
 
 ## Credits
