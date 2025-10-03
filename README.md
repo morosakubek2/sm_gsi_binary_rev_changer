@@ -9,8 +9,8 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
 - Changes binary revision (SW REV) for non-system partitions (e.g., `vendor`, `product`, `odm`) and other images (e.g., `boot.img`, `vbmeta.img`) to any user-specified value.
 - Skips SW REV change for `system.img` when using GSI.
 - Supports sparse images (`simg2img`) and LZ4 compression.
+- Supports GSI images in `.xz` format (automatically decompresses).
 - Dynamically detects partitions and calculates `super.img` size, eliminating manual configuration.
-- Supports optional GSI image replacement via `-g/--gsi`.
 - Generates `AP_modified.tar` for flashing with Odin.
 - Compatible with Artix Linux (Arch-based) and other Linux distributions.
 
@@ -21,19 +21,20 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
   - `lz4`
   - `python3`
   - `tar`
+  - `xz` (for decompressing `.xz` GSI images)
 - **Hardware**:
   - 20GB free disk space (for `super.img` processing).
   - 16GB+ RAM recommended (for sparse image conversion).
 - **Firmware Files**:
   - Source AP package (e.g., `AP_*.tar.md5` for OneUI 6.1, Android 14, SW REV 11) from [samfw.com](https://samfw.com/firmware/SM-F711B).
-  - Optional: GSI image (e.g., `system.img`) for replacement.
+  - Optional: GSI image (e.g., `system.img` or `system.img.xz`) for replacement.
 - **Device**: Samsung Galaxy Z Flip 3 with unlocked bootloader.
 - **Permissions**: Root access required for `mount`, `umount`, and other commands (script uses `sudo` automatically).
 
 ## Installation
 1. Install dependencies on Artix Linux:
    ```bash
-   sudo pacman -S android-tools lz4 python tar
+   sudo pacman -S android-tools lz4 python tar xz
    ```
    If `android-tools` is unavailable, use AUR:
    ```bash
@@ -56,7 +57,7 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
 ## Usage
 1. **Prepare firmware**:
    - Download the target AP package (e.g., `AP_*.tar.md5` for OneUI 6.1, Android 14, SW REV 11) from [samfw.com](https://samfw.com/firmware/SM-F711B).
-   - Optional: Place a GSI image (e.g., `system.img`) in the same directory to replace the stock system.
+   - Optional: Place a GSI image (e.g., `system.img` or `system.img.xz`) in the same directory to replace the stock system.
 
 2. **Run the script**:
    ```bash
@@ -65,12 +66,12 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
    - `-k/--keep-files`: Keep temporary files (default: delete).
    - `-v/--verbose`: Enable verbose output for debugging.
    - `-r <target_rev>`: Target binary revision (e.g., `0x0F` for SW REV 15, `0x0B` for SW REV 11).
-   - `-g <gsi_image>`: Optional GSI image to replace `system.img`.
+   - `-g <gsi_image>`: Optional GSI image to replace `system.img` (supports `.xz`).
    - `<input_tar>`: Input `AP_*.tar.md5` file.
    - `[output_dir]`: Output directory (default: `./out`).
-   Example (with GSI):
+   Example (with GSI in .xz format):
    ```bash
-   ./build-gsi.sh -r 0x0F -v -g system_gsi.img AP_F711BXXU6EWK1.tar.md5 out
+   ./build-gsi.sh -r 0x0F -v -g system_gsi.img.xz AP_F711BXXU6EWK1.tar.md5 out
    ```
    Example (without GSI):
    ```bash
@@ -110,6 +111,7 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
   sudo -l
   ```
 - **Temporary Files**: Use `-k/--keep-files` to preserve temporary files in `/tmp` for debugging. Default: files are deleted.
+- **GSI Support**: Supports `.xz` compressed GSI images (e.g., `system.img.xz`). The script automatically decompresses them.
 - **Partitions**: Dynamically detects all partitions in `super.img` (e.g., `vendor`, `product`, `odm`). Check after unpacking:
   ```bash
   ls out/super
@@ -124,8 +126,29 @@ This script (`build-gsi.sh`) generates a modified AP package for Samsung devices
 - **XDA Support**: Check [XDA forums](https://xdaforums.com) for Flip 3-specific issues (search "Flip 3 downgrade GSI rev").
 
 ## Troubleshooting
-- **Mount errors**: Ensure the loop module is loaded (`sudo modprobe loop`) and your user has sudo privileges. Check verbose logs (`-v`) for details.
-- **Tool errors**: Ensure all dependencies are installed. If `android-tools` is missing, build from AUR or AOSP source.
+- **Mount errors** (e.g., "Permission denied" for `product.img`):
+  - Ensure the loop module is loaded:
+    ```bash
+    sudo modprobe loop
+    ```
+  - Check loop device permissions:
+    ```bash
+    ls -l /dev/loop*
+    sudo chmod 666 /dev/loop*
+    ```
+  - Verify sudo privileges:
+    ```bash
+    sudo -l
+    ```
+  - Run with `-v` and `-k` to inspect logs and temporary files:
+    ```bash
+    ./build-gsi.sh -k -v -r 0x0F AP_F711BXXU6EWK1.tar.md5 out
+    ```
+  - Check filesystem integrity:
+    ```bash
+    sudo e2fsck -f -y /tmp/<temp_dir>/super/product.img
+    ```
+- **Tool errors**: Ensure all dependencies are installed (`xz` for `.xz` GSI images). If `android-tools` is missing, build from AUR or AOSP source.
 - **Model string not found**: Provide the full firmware string (e.g., `SM-F711BXXU6EWK1`) when prompted or hardcode in the script.
 - **Repack errors**: Verify partition sizes (`ls -l out/super/*.img`) and ensure sufficient disk space.
 - **Verbose logs**: Use `-v` for detailed output. Share full logs for support.
