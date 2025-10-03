@@ -3,6 +3,7 @@
 # build-gsi.sh - Modified to include flexible binary rev change for Samsung firmware
 # Original: https://gist.githubusercontent.com/sandorex/031c006cc9f705c3640bad8d5b9d66d2/raw/9d20da4905d01eb2d98686199d3c32d9800f486c/build-gsi.sh
 # Added: Binary rev change for non-system partitions in super.img and other images (e.g., boot.img, vbmeta.img)
+# Improved: Dynamic device_size calculation based on partition sizes
 
 set -e
 
@@ -222,4 +223,80 @@ if [ -f "$system_img" ]; then
     $USE_SUDO mount -o loop,rw "$system_img" "$mount_dir"
     vprint "Applying GSI modifications to system"
     $USE_SUDO rm -rf "$mount_dir/product/app"/* || true
-    $USE_S
+    $USE_SUDO umount "$mount_dir"
+    $USE_SUDO $E2FSCK -f -y "$system_img"
+    $USE_SUDO $RESIZE2FS -M "$system_img"
+fi
+
+# Calculate device_size dynamically
+vprint "Calculating device_size for super.img"
+device_size=0
+all_partitions=("system" "${partitions[@]}")
+for part in "${all_partitions[@]}"; do
+    part_img="$super_dir/$part.img"
+    if [ -f "$part_img" ]; then
+        size=$($USE_SUDO stat -c %s "$part_img")
+        device_size=$((device_size + size))
+    fi
+done
+# Add metadata overhead (65536 bytes)
+device_size=$((device_size + 65536))
+
+# Repack super.img
+vprint "Repacking super image"
+output_super="$OUTPUT/super.img"
+lpmake_args=(
+    "--metadata-size" "65536"
+    "--super-name" "super"
+    "--device" "super:$device_size"
+    "--group" "main:$device_size"
+)
+for part in "${all_partitions[@]}"; do
+    part_img="$super_dir/$part.img"
+    if [ -f "$part_img" ]; then
+        size=$($USE_SUDO stat -c %s "$part_img")
+        lpmake_args+=("--partition" "$part:readonly:$size:main" "--image" "$part=$part_img")
+    fi
+done
+lpmake_args+=("--output" "$output_super")
+$USE_SUDO $LPMAKE "${lpmake_args[@]}"
+
+# Compress super.img to LZ4
+vprint "Compressing super.img to LZ4"
+$USE_SUDO $LZ4 "$output_super" "$OUTPUT/super.img.lz4"
+
+# Process other images in tar (e.g., boot.img, vbmeta.img)
+tar_images=$(find "$tar_dir" -name "*.img" ! -name "super.img")
+for img in $tar_images; do
+    img_name=$(basename "$img")
+    vprint "Processing $img_name"
+    if [ -n "$REV" ]; then
+        change_binary_rev "$img" "$REV"
+    fi
+    $USE_SUDO $LZ4 "$img" "$OUTPUT/$img_name.lz4"
+done
+
+# Generate vbmeta if needed
+vprint "Generating vbmeta"
+vbmeta_img="$OUTPUT/vbmeta.img"
+$USE_SUDO $AVBTOOL make_vbmeta_image --flag 2 --padding_size 4096 --output "$vbmeta_img"
+if [ -n "$REV" ]; then
+    change_binary_rev "$vbmeta_img" "$REV"
+fi
+$USE_SUDO $LZ4 "$vbmeta_img" "$OUTPUT/vbmeta.img.lz4"
+
+# Create AP package
+vprint "Creating AP package"
+ap_tar="$OUTPUT/AP_modified.tar"
+tar_files=("$OUTPUT/super.img.lz4" "$OUTPUT/vbmeta.img.lz4")
+for img in $tar_images; do
+    img_name=$(basename "$img")
+    lz4_img="$OUTPUT/$img_name.lz4"
+    if [ -f "$lz4_img" ]; then
+        tar_files+=("$lz4_img")
+    fi
+done
+$USE_SUDO $TAR -cvf "$ap_tar" -C "$OUTPUT" "${tar_files[@]#$OUTPUT/}"
+
+echo "[*] Done! AP package created at $ap_tar"
+exit 0
