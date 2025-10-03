@@ -3,13 +3,12 @@
 # build-gsi.sh - Modified to include flexible binary rev change for Samsung firmware
 # Original: https://gist.githubusercontent.com/sandorex/031c006cc9f705c3640bad8d5b9d66d2/raw/9d20da4905d01eb2d98686199d3c32d9800f486c/build-gsi.sh
 # Added: Binary rev change for non-system partitions in super.img and other images (e.g., boot.img, vbmeta.img)
-# Improved: Dynamic device_size and partition detection, optional GSI input, fixed sudo for mount/umount
+# Improved: Dynamic device_size and partition detection, optional GSI input, sudo for all privileged commands
 
 set -e
 
 # Default options
 KEEP_FILES=0
-USE_SUDO=""
 USE_SYSTEM_LZ4=0
 VERBOSE=0
 REV=""
@@ -50,7 +49,6 @@ usage() {
     echo "Usage: $0 [options] <input_tar> [output_dir]"
     echo "Options:"
     echo "  -k, --keep-files    Keep temporary files"
-    echo "  -s, --sudo          Use sudo for commands"
     echo "  -l, --system-lz4    Use system lz4 instead of bundled"
     echo "  -v, --verbose       Verbose output"
     echo "  -r, --rev <value>   Change binary revision (e.g., 0x0F)"
@@ -64,7 +62,6 @@ usage() {
 while [ $# -gt 0 ]; do
     case "$1" in
         -k|--keep-files) KEEP_FILES=1 ;;
-        -s|--sudo) USE_SUDO="sudo" ;;
         -l|--system-lz4) USE_SYSTEM_LZ4=1 ;;
         -v|--verbose) VERBOSE=1 ;;
         -r|--rev) REV="$2"; shift ;;
@@ -121,7 +118,7 @@ check_tool "tar" "$TAR"
 # Check loop module
 if ! lsmod | grep -q loop; then
     vprint "Loading loop module"
-    $USE_SUDO modprobe loop || {
+    sudo modprobe loop || {
         echo "Error: Failed to load loop module. Run 'sudo modprobe loop' manually."
         exit 1
     }
@@ -178,7 +175,7 @@ EOF
 vprint "Extracting $INPUT"
 tar_dir="$TEMP_DIR/tar"
 mkdir -p "$tar_dir"
-$USE_SUDO $TAR -xvf "$INPUT" -C "$tar_dir"
+sudo $TAR -xvf "$INPUT" -C "$tar_dir"
 
 # Process super.img.lz4
 super_lz4=$(find "$tar_dir" -name "super.img.lz4")
@@ -188,13 +185,13 @@ if [ -z "$super_lz4" ]; then
 fi
 
 vprint "Decompressing $super_lz4"
-$USE_SUDO $LZ4 -d "$super_lz4" "$TEMP_DIR/super.img"
+sudo $LZ4 -d "$super_lz4" "$TEMP_DIR/super.img"
 
 # Check if super.img is sparse
 if file "$TEMP_DIR/super.img" | grep -q "Android sparse image"; then
     vprint "Converting sparse super.img to raw"
     raw_super="$TEMP_DIR/super_raw.img"
-    $USE_SUDO $SIMG2IMG "$TEMP_DIR/super.img" "$raw_super"
+    sudo $SIMG2IMG "$TEMP_DIR/super.img" "$raw_super"
     mv "$raw_super" "$TEMP_DIR/super.img"
 fi
 
@@ -202,12 +199,12 @@ fi
 vprint "Unpacking super image"
 super_dir="$TEMP_DIR/super"
 mkdir -p "$super_dir"
-$USE_SUDO $LPUNPACK "$TEMP_DIR/super.img" "$super_dir"
+sudo $LPUNPACK "$TEMP_DIR/super.img" "$super_dir"
 
 # Replace system.img with GSI if provided
 if [ -n "$GSI_IMAGE" ] && [ -f "$GSI_IMAGE" ]; then
     vprint "Replacing system.img with provided GSI: $GSI_IMAGE"
-    $USE_SUDO cp "$GSI_IMAGE" "$super_dir/system.img"
+    sudo cp "$GSI_IMAGE" "$super_dir/system.img"
 fi
 
 # Process partitions, skip system.img for rev change (GSI)
@@ -222,18 +219,18 @@ for part in "${partitions[@]}"; do
     # Mount and modify for GSI
     mount_dir="$TEMP_DIR/mount_$part"
     mkdir -p "$mount_dir"
-    $USE_SUDO mount -o loop,rw "$part_img" "$mount_dir" || {
-        echo "Error: Failed to mount $part_img. Check permissions or run with -s/--sudo."
+    sudo mount -o loop,rw "$part_img" "$mount_dir" || {
+        echo "Error: Failed to mount $part_img. Check permissions or loop module."
         exit 1
     }
     vprint "Applying modifications to $part"
-    $USE_SUDO rm -rf "$mount_dir/product/app"/* || true
-    $USE_SUDO umount "$mount_dir" || {
-        echo "Error: Failed to unmount $part_img. Check permissions or run with -s/--sudo."
+    sudo rm -rf "$mount_dir/product/app"/* || true
+    sudo umount "$mount_dir" || {
+        echo "Error: Failed to unmount $part_img. Check permissions."
         exit 1
     }
-    $USE_SUDO $E2FSCK -f -y "$part_img"
-    $USE_SUDO $RESIZE2FS -M "$part_img"
+    sudo $E2FSCK -f -y "$part_img"
+    sudo $RESIZE2FS -M "$part_img"
 done
 
 # Process system.img for GSI (no rev change)
@@ -242,18 +239,18 @@ if [ -f "$system_img" ]; then
     vprint "Processing system.img (GSI, no rev change)"
     mount_dir="$TEMP_DIR/mount_system"
     mkdir -p "$mount_dir"
-    $USE_SUDO mount -o loop,rw "$system_img" "$mount_dir" || {
-        echo "Error: Failed to mount $system_img. Check permissions or run with -s/--sudo."
+    sudo mount -o loop,rw "$system_img" "$mount_dir" || {
+        echo "Error: Failed to mount $system_img. Check permissions or loop module."
         exit 1
     }
     vprint "Applying GSI modifications to system"
-    $USE_SUDO rm -rf "$mount_dir/product/app"/* || true
-    $USE_SUDO umount "$mount_dir" || {
-        echo "Error: Failed to unmount $system_img. Check permissions or run with -s/--sudo."
+    sudo rm -rf "$mount_dir/product/app"/* || true
+    sudo umount "$mount_dir" || {
+        echo "Error: Failed to unmount $system_img. Check permissions."
         exit 1
     }
-    $USE_SUDO $E2FSCK -f -y "$system_img"
-    $USE_SUDO $RESIZE2FS -M "$system_img"
+    sudo $E2FSCK -f -y "$system_img"
+    sudo $RESIZE2FS -M "$system_img"
 fi
 
 # Calculate device_size dynamically
@@ -263,7 +260,7 @@ all_partitions=($(find "$super_dir" -name "*.img" -exec basename {} \; | sed 's/
 for part in "${all_partitions[@]}"; do
     part_img="$super_dir/$part.img"
     if [ -f "$part_img" ]; then
-        size=$($USE_SUDO stat -c %s "$part_img")
+        size=$(sudo stat -c %s "$part_img")
         device_size=$((device_size + size))
     fi
 done
@@ -282,16 +279,16 @@ lpmake_args=(
 for part in "${all_partitions[@]}"; do
     part_img="$super_dir/$part.img"
     if [ -f "$part_img" ]; then
-        size=$($USE_SUDO stat -c %s "$part_img")
+        size=$(sudo stat -c %s "$part_img")
         lpmake_args+=("--partition" "$part:readonly:$size:main" "--image" "$part=$part_img")
     fi
 done
 lpmake_args+=("--output" "$output_super")
-$USE_SUDO $LPMAKE "${lpmake_args[@]}"
+sudo $LPMAKE "${lpmake_args[@]}"
 
 # Compress super.img to LZ4
 vprint "Compressing super.img to LZ4"
-$USE_SUDO $LZ4 "$output_super" "$OUTPUT/super.img.lz4"
+sudo $LZ4 "$output_super" "$OUTPUT/super.img.lz4"
 
 # Process other images in tar (e.g., boot.img, vbmeta.img)
 tar_images=$(find "$tar_dir" -name "*.img" ! -name "super.img")
@@ -301,17 +298,17 @@ for img in $tar_images; do
     if [ -n "$REV" ]; then
         change_binary_rev "$img" "$REV"
     fi
-    $USE_SUDO $LZ4 "$img" "$OUTPUT/$img_name.lz4"
+    sudo $LZ4 "$img" "$OUTPUT/$img_name.lz4"
 done
 
 # Generate vbmeta if needed
 vprint "Generating vbmeta"
 vbmeta_img="$OUTPUT/vbmeta.img"
-$USE_SUDO $AVBTOOL make_vbmeta_image --flag 2 --padding_size 4096 --output "$vbmeta_img"
+sudo $AVBTOOL make_vbmeta_image --flag 2 --padding_size 4096 --output "$vbmeta_img"
 if [ -n "$REV" ]; then
     change_binary_rev "$vbmeta_img" "$REV"
 fi
-$USE_SUDO $LZ4 "$vbmeta_img" "$OUTPUT/vbmeta.img.lz4"
+sudo $LZ4 "$vbmeta_img" "$OUTPUT/vbmeta.img.lz4"
 
 # Create AP package
 vprint "Creating AP package"
@@ -324,7 +321,7 @@ for img in $tar_images; do
         tar_files+=("$lz4_img")
     fi
 done
-$USE_SUDO $TAR -cvf "$ap_tar" -C "$OUTPUT" "${tar_files[@]#$OUTPUT/}"
+sudo $TAR -cvf "$ap_tar" -C "$OUTPUT" "${tar_files[@]#$OUTPUT/}"
 
 echo "[*] Done! AP package created at $ap_tar"
 exit 0
