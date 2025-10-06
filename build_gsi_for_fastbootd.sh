@@ -6,6 +6,10 @@
 # Ensures model replacement across all images (e.g., boot.img, vendor_boot.img, userdata.img)
 # Adds --experimental-model-replace to make model replacement outside SignerVer02 optional
 # Adds --build-ap to generate an experimental AP_*.tar.md5 (likely won't work with Odin)
+# Adds --model to specify old model string explicitly (overrides filename detection)
+# Makes GSI replacement optional (no --gsi flag required)
+# Adds vbmeta.img to default excluded files
+# Ensures proper permissions for temporary files to avoid Permission denied errors
 
 set -e
 
@@ -18,7 +22,7 @@ GSI_IMAGE=""
 LAST_IMAGE=""
 OLD_MODEL=""
 MODEL=""
-EXCLUDE_FILES=("vbmeta.img" "recovery.img")
+EXCLUDE_FILES=("recovery.img" "vbmeta.img")
 
 # Directories
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
@@ -64,18 +68,19 @@ usage() {
     echo "Options:"
     echo "  -k, --keep-files             Keep temporary files"
     echo "  -v, --verbose                Verbose output"
-    echo "  -m, --experimental-model-replace  Enable experimental model replacement outside SignerVer02"
+    echo "  -m, --model MODEL            Specify old model string (e.g., F711BXXS8HXE1) [overrides filename detection]"
+    echo "  -n, --experimental-model-replace  Enable experimental model replacement outside SignerVer02"
     echo "  -b, --build-ap               [EXPERIMENTAL] Build modified AP_*.tar.md5 instead of fastboot images (likely won't work with Odin)"
-    echo "  -g, --gsi FILE               GSI image to replace system.img (.xz supported) [REQUIRED]"
-    echo "  -l, --last-image FILE        Image from new firmware to extract params (misc.bin, boot.img, etc., .lz4 supported) [OPTIONAL]"
+    echo "  -g, --gsi FILE               GSI image to replace system.img (.xz supported) [optional]"
+    echo "  -l, --last-image FILE        Image from currently installed firmware to extract params (misc.bin, boot.img, etc., .lz4 supported) [optional]"
     echo "  -o, --output DIR             Output directory (default: ./fastboot_images or ./modified_ap for --build-ap)"
     echo "  -e, --exclude FILE           Add file to exclude list (can be used multiple times)"
     echo ""
     echo "Examples:"
     echo "  $0 -g system.img.xz AP_FILE.tar.md5                    # Replace GSI only"
     echo "  $0 -l new_misc.bin -g system.img.xz AP_FILE.tar.md5    # Extract params from new image and replace GSI"
-    echo "  $0 -l new_misc.bin.lz4 -m -g system.img.xz AP_FILE.tar.md5  # Extract params, replace GSI, and enable experimental model replacement"
-    echo "  $0 -l new_misc.bin.lz4 -b -g system.img.xz AP_FILE.tar.md5  # [EXPERIMENTAL] Build modified AP_*.tar.md5"
+    echo "  $0 -l new_misc.bin.lz4 -n -m F711BXXS8HXE1 -g system.img.xz AP_FILE.tar.md5  # Extract params, replace GSI, and enable experimental model replacement"
+    echo "  $0 -l new_misc.bin.lz4 -b -m F711BXXS8HXE1 AP_FILE.tar.md5  # [EXPERIMENTAL] Build modified AP_*.tar.md5 without GSI"
     echo ""
     echo "Output: Directory with uncompressed images for fastboot (super.img, boot.img, etc.) or experimental AP_*.tar.md5"
     echo "Input: AP_*.tar.md5 file containing super.img.lz4, boot.img.lz4, etc."
@@ -105,17 +110,20 @@ extract_params() {
             echo "[-] ERROR: Failed to decompress LZ4 file: $last_image"
             exit 1
         fi
-        last_image="$temp_image"
+        chmod 644 "$temp_image"  # Ensure proper permissions
+    else
+        cp "$last_image" "$temp_image"
+        chmod 644 "$temp_image"
     fi
 
-    if [ ! -f "$last_image" ]; then
-        echo "[-] ERROR: last-image file not found after decompression: $last_image"
+    if [ ! -f "$temp_image" ]; then
+        echo "[-] ERROR: last-image file not found after decompression: $temp_image"
         exit 1
     fi
 
-    vprint "Extracting parameters from $last_image"
-    if ! $PYTHON3 "$EXTRACT_PARAMS_SCRIPT" "$last_image" --output-json "$OUTPUT_JSON" --output-signer "$OUTPUT_SIGNER_BIN"; then
-        echo "[-] ERROR: extract_params.py failed to process $last_image"
+    vprint "Extracting parameters from $temp_image"
+    if ! $PYTHON3 "$EXTRACT_PARAMS_SCRIPT" "$temp_image" --output-json "$OUTPUT_JSON" --output-signer "$OUTPUT_SIGNER_BIN"; then
+        echo "[-] ERROR: extract_params.py failed to process $temp_image"
         exit 1
     fi
 
@@ -124,12 +132,14 @@ extract_params() {
         exit 1
     fi
 
+    # Ensure output files have proper permissions
+    chmod 644 "$OUTPUT_JSON" "$OUTPUT_SIGNER_BIN" 2>/dev/null
+
     # Extract model from JSON
     if [ -f "$OUTPUT_JSON" ]; then
         vprint "Contents of $OUTPUT_JSON:"
         cat "$OUTPUT_JSON" 2>/dev/null || echo "[-] ERROR: Cannot read $OUTPUT_JSON"
         vprint "Extracting device_model from $OUTPUT_JSON"
-        chmod 644 "$OUTPUT_JSON" 2>/dev/null
         MODEL=$(jq -r '.device_model' "$OUTPUT_JSON" 2>/tmp/jq_error.log)
         jq_exit_code=$?
         if [ $jq_exit_code -ne 0 ]; then
@@ -172,6 +182,9 @@ apply_signer_update() {
         return 0
     fi
 
+    # Ensure image has proper permissions
+    chmod 644 "$image_path" 2>/dev/null
+
     local cmd=("$PYTHON3" "$UPDATE_SIGNER_SCRIPT" "update-file" "$image_path")
 
     if [ -f "$OUTPUT_SIGNER_BIN" ]; then
@@ -206,6 +219,7 @@ build_modified_ap() {
     # Create temporary directory for LZ4 files
     local lz4_dir="$TEMP_DIR/lz4_files"
     mkdir -p "$lz4_dir"
+    chmod 755 "$lz4_dir"
 
     # Compress images to LZ4
     for img_file in "$output_dir"/*.img; do
@@ -214,6 +228,7 @@ build_modified_ap() {
         lz4_file="$lz4_dir/$img_name.lz4"
         vprint "Compressing $img_name to $lz4_file"
         $LZ4 "$img_file" "$lz4_file"
+        chmod 644 "$lz4_file" 2>/dev/null
     done
 
     # Create tar file
@@ -235,7 +250,15 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -k|--keep-files) KEEP_FILES=1 ;;
         -v|--verbose) VERBOSE=1 ;;
-        -m|--experimental-model-replace) EXPERIMENTAL_MODEL_REPLACE=1 ;;
+        -m|--model)
+            if [ -z "$2" ]; then
+                echo "Error: --model requires a model string"
+                usage
+            fi
+            OLD_MODEL="$2"
+            shift
+            ;;
+        -n|--experimental-model-replace) EXPERIMENTAL_MODEL_REPLACE=1 ;;
         -b|--build-ap) BUILD_AP=1 ;;
         -g|--gsi)
             if [ -z "$2" ]; then
@@ -288,9 +311,8 @@ if [ -z "$INPUT" ] || [[ ! "$INPUT" =~ \.tar\.md5$ ]]; then
     usage
 fi
 
-# Extract old model from AP filename if not provided
+# Extract old model from AP filename if not provided via --model
 input_filename=$(basename "$INPUT")
-OLD_MODEL=""
 if [ -z "$OLD_MODEL" ]; then
     if [[ "$input_filename" =~ AP_([^_]+)_ ]]; then
         OLD_MODEL="${BASH_REMATCH[1]}"
@@ -298,10 +320,12 @@ if [ -z "$OLD_MODEL" ]; then
     else
         echo "[+] Warning: Could not detect old model from filename automatically"
     fi
+else
+    echo "[+] Using user-specified old model: $OLD_MODEL"
 fi
 
-if [ -z "$GSI_IMAGE" ] || [ ! -f "$GSI_IMAGE" ]; then
-    echo "Error: GSI image must be provided and exist"
+if [ -n "$GSI_IMAGE" ] && [ ! -f "$GSI_IMAGE" ]; then
+    echo "Error: GSI image must exist if provided"
     usage
 fi
 
@@ -335,13 +359,16 @@ if [ $BUILD_AP -eq 1 ]; then
 fi
 
 INPUT=$(realpath "$INPUT")
-GSI_IMAGE=$(realpath "$GSI_IMAGE")
+if [ -n "$GSI_IMAGE" ]; then
+    GSI_IMAGE=$(realpath "$GSI_IMAGE")
+fi
 if [ -n "$LAST_IMAGE" ]; then
     LAST_IMAGE=$(realpath "$LAST_IMAGE")
 fi
 
 OUTDIR="$(realpath -m "$OUTDIR")"
 mkdir -p "$OUTDIR"
+chmod 755 "$OUTDIR"  # Ensure output directory is writable
 echo "[+] Output directory: $OUTDIR"
 
 rm -rf "$OUTDIR"/*
@@ -375,9 +402,11 @@ convert_sparse_to_raw() {
         if ! $SIMG2IMG "$input_image" "$output_image" 2>/dev/null; then
             echo "[-] Warning: Failed to convert sparse image $(basename "$input_image") (Invalid sparse file format), continuing..."
         fi
+        chmod 644 "$output_image" 2>/dev/null
         return 0
     else
         cp "$input_image" "$output_image"
+        chmod 644 "$output_image" 2>/dev/null
         return 1
     fi
 }
@@ -389,12 +418,14 @@ convert_raw_to_sparse() {
 
     vprint "Converting raw image to sparse: $(basename "$output_image")"
     $IMG2SIMG "$input_image" "$output_image"
+    chmod 644 "$output_image" 2>/dev/null
 }
 
 # Extract AP tar
 tar_dir="$TEMP_DIR/tar"
 vprint "Extracting $INPUT to $tar_dir"
 mkdir -p "$tar_dir"
+chmod 755 "$tar_dir"
 $TAR -xf "$INPUT" -C "$tar_dir"
 
 # Remove excluded files immediately after extraction
@@ -425,6 +456,7 @@ if [ -n "$LAST_IMAGE" ]; then
 
         # Decompress
         $LZ4 -d "$lz4_file" "$TEMP_DIR/$img_name"
+        chmod 644 "$TEMP_DIR/$img_name" 2>/dev/null
 
         # Check if image is sparse and convert to raw for modification
         raw_img="$TEMP_DIR/${img_name}_raw"
@@ -443,6 +475,7 @@ if [ -n "$LAST_IMAGE" ]; then
             echo "[+] Created (sparse): $OUTDIR/$img_name"
         else
             cp "$raw_img" "$OUTDIR/$img_name"
+            chmod 644 "$OUTDIR/$img_name" 2>/dev/null
             echo "[+] Created: $OUTDIR/$img_name"
         fi
     done
@@ -457,6 +490,7 @@ else
             continue
         fi
         $LZ4 -d "$lz4_file" "$OUTDIR/$img_name"
+        chmod 644 "$OUTDIR/$img_name" 2>/dev/null
         echo "[+] Created: $OUTDIR/$img_name"
     done
 fi
@@ -481,6 +515,7 @@ for lz4_file in "$tar_dir"/*.lz4; do
 
     # Decompress and copy to OUTDIR
     $LZ4 -d "$lz4_file" "$OUTDIR/$img_name"
+    chmod 644 "$OUTDIR/$img_name" 2>/dev/null
     echo "[+] Created: $OUTDIR/$img_name"
     vprint "Decompressed: $filename -> $img_name"
 done
@@ -492,10 +527,11 @@ if [ -z "$super_lz4" ]; then
     exit 1
 fi
 
-echo "[+] Processing super image (unpacking and GSI replacement)"
+echo "[+] Processing super image (unpacking and optional GSI replacement)"
 
 vprint "Decompressing super.img.lz4"
 $LZ4 -d "$super_lz4" "$TEMP_DIR/super.img"
+chmod 644 "$TEMP_DIR/super.img" 2>/dev/null
 
 # Convert sparse super.img to raw
 if file "$TEMP_DIR/super.img" | grep -q "Android sparse image"; then
@@ -504,105 +540,9 @@ if file "$TEMP_DIR/super.img" | grep -q "Android sparse image"; then
         echo "[-] Warning: Failed to convert sparse super.img (Invalid sparse file format), continuing..."
     fi
     [ -f "$TEMP_DIR/super_raw.img" ] && mv "$TEMP_DIR/super_raw.img" "$TEMP_DIR/super.img"
+    chmod 644 "$TEMP_DIR/super.img" 2>/dev/null
 fi
 
 # Unpack super.img
 super_dir="$TEMP_DIR/super"
-vprint "Unpacking super image to $super_dir"
-mkdir -p "$super_dir"
-$LPUNPACK "$TEMP_DIR/super.img" "$super_dir"
-
-# SKIP modifications for super partitions - only replace GSI
-echo "[+] Skipping modifications for super partitions (only replacing system.img with GSI)"
-
-# Replace system.img with GSI
-if [ -n "$GSI_IMAGE" ] && [ -f "$GSI_IMAGE" ]; then
-    vprint "Processing GSI image: $GSI_IMAGE"
-    gsi_temp="$TEMP_DIR/system_gsi.img"
-
-    if [[ "$GSI_IMAGE" == *.xz ]]; then
-        vprint "Decompressing GSI image with xz"
-        $XZ -d -k -c "$GSI_IMAGE" > "$gsi_temp"
-    else
-        cp "$GSI_IMAGE" "$gsi_temp"
-    fi
-
-    # Convert GSI to raw if sparse
-    if file "$gsi_temp" | grep -q "Android sparse image"; then
-        vprint "Converting GSI from sparse to raw"
-        $SIMG2IMG "$gsi_temp" "$TEMP_DIR/system_gsi_raw.img"
-        mv "$TEMP_DIR/system_gsi_raw.img" "$gsi_temp"
-    fi
-
-    vprint "Replacing system.img with GSI"
-    cp "$gsi_temp" "$super_dir/system.img"
-fi
-
-# Repack super.img
-vprint "Repacking super image"
-output_super="$OUTDIR/super.img"
-
-# Get original super size
-original_super_size=$(stat -c %s "$TEMP_DIR/super.img")
-
-# Get partition list and sizes
-partitions=$(find "$super_dir" -name "*.img" -exec basename {} .img \; | sort)
-
-lpmake_args=(
-    "--metadata-size" "65536"
-    "--metadata-slots" "2"
-    "--device" "super:$original_super_size"
-    "--group" "main:0"
-)
-
-total_size=0
-for part in $partitions; do
-    part_img="$super_dir/$part.img"
-    if [ -f "$part_img" ]; then
-        size=$(stat -c %s "$part_img")
-        total_size=$((total_size + size))
-        lpmake_args+=("--partition" "$part:readonly:$size:main" "--image" "$part=$part_img")
-    fi
-done
-
-# Update group size
-lpmake_args[7]="main:$total_size"
-lpmake_args+=("--sparse" "--output" "$output_super")
-
-vprint "Running lpmake to repack super.img"
-$LPMAKE "${lpmake_args[@]}"
-
-echo "[+] Created: $output_super"
-
-# If --build-ap is enabled, create modified AP tar.md5
-if [ $BUILD_AP -eq 1 ]; then
-    ap_output="$WORKDIR/AP_${MODEL}_${MODEL}_modified.tar"
-    build_modified_ap "$OUTDIR" "$ap_output"
-    OUTDIR="$WORKDIR/modified_ap"  # Update OUTDIR for final message
-fi
-
-echo "[+] SUCCESS: Output created in: $OUTDIR"
-
-if [ -n "$LAST_IMAGE" ]; then
-    echo "[+] Parameters extracted from: $LAST_IMAGE"
-    echo "[+] Applied new model: $MODEL"
-fi
-
-echo "[+] GSI image integrated successfully"
-echo ""
-echo "[+] Available output in $OUTDIR:"
-if [ $BUILD_AP -eq 1 ]; then
-    echo "    $(basename "${ap_output}.md5")"
-else
-    for img_file in "$OUTDIR"/*.img; do
-        [ ! -f "$img_file" ] && continue
-        img_size=$(du -h "$img_file" | cut -f1)
-        echo "    $(basename "$img_file") (${img_size})"
-    done
-    echo ""
-    echo "[+] Flash using fastboot commands, for example:"
-    echo "    fastboot flash super super.img"
-    echo "    fastboot flash boot boot.img"
-    echo "    fastboot flash vendor_boot vendor_boot.img"
-    echo "    fastboot reboot"
-fi
+vprint "
