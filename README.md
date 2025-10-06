@@ -1,162 +1,211 @@
-# Samsung Firmware GSI Builder with Binary Revision Changer
+# Samsung Firmware GSI Builder with Model and Signer Update
 
-This script (`build-gsi.sh`) generates a modified AP package for Samsung devices, enabling downgrade or installation of a Generic System Image (GSI) with customizable binary revision (SW REV) changes. It is tailored for devices like the Samsung Galaxy Z Flip 3 (SM-F711B/U/N), allowing users to modify firmware images (e.g., `super.img`, `boot.img`, `vbmeta.img`) to match the bootloader's SW REV (e.g., from 11/0x0B to 15/0x0F) while supporting GSI for the system partition.
+**Educational Purpose Only**: This project is intended solely for educational purposes to demonstrate firmware modification techniques for Samsung devices. Using this script on a real device carries significant risks, including **bootloop** or **hardbrick**, which may render your device unusable. Proceed at your own risk, and ensure you have a full backup of your data (photos, files, Google/Samsung accounts) before attempting any modifications. The author is not responsible for any damage to your device.
 
-**Warning**: Modifying firmware can brick your device or cause data loss. Always back up data (photos, files, Google/Samsung accounts) before proceeding. Use at your own risk.
+**Requirement**: Your device's recovery mode **must support access to `fastbootd`** (dynamic partition flashing mode). Without `fastbootd` support, the generated images cannot be flashed correctly, increasing the risk of bricking your device.
+
+This repository contains the `build_gsi_for_fastbootd.sh` script, designed to generate either fastboot-compatible images or an experimental modified `AP_*.tar.md5` package for Samsung devices (e.g., Galaxy Z Flip 3, SM-F711B). The script supports replacing the `system.img` with a Generic System Image (GSI), updating the `SignerVer02` section, and optionally modifying the device model string (e.g., from `F711BXXS8HXF2` to `F711BXXSFJYGB`) across firmware images like `boot.img`, `vendor_boot.img`, and `userdata.img`. It integrates with `extract_params.py` and `update_signer.py` to extract parameters from a provided `--last-image` (e.g., `misc.bin.lz4`) and apply them to other images.
+
+**Warning**: The `--experimental-model-replace` and `--build-ap` options are highly experimental and may not work as expected, especially with Odin. Using these features, or the script in general, can lead to **bootloop** or **hardbrick**. Ensure your device's recovery supports `fastbootd` before proceeding.
 
 ## Features
-- Automatically processes `AP_*.tar.md5`, extracting and handling `super.img.lz4`, `boot.img`, `vbmeta.img`, etc.
-- Changes binary revision (SW REV) for non-system partitions (e.g., `vendor`, `product`, `odm`) and other images (e.g., `boot.img`, `vbmeta.img`) to any user-specified value.
-- Skips SW REV change for `system.img` when using GSI.
-- Supports sparse images (`simg2img`) and LZ4 compression.
-- Supports GSI images in `.xz` format (automatically decompresses).
-- Dynamically detects partitions and calculates `super.img` size, eliminating manual configuration.
-- Generates `AP_modified.tar` for flashing with Odin.
-- Compatible with Artix Linux (Arch-based) and other Linux distributions.
+
+- Processes `AP_*.tar.md5` archives, handling images like `super.img.lz4`, `boot.img.lz4`, `vendor_boot.img.lz4`, etc.
+- Replaces `system.img` in `super.img` with a provided GSI (supports `.xz` format).
+- Extracts `SignerVer02` section and device model from a `--last-image` (e.g., `misc.bin.lz4`) and applies them to other images (except `super.img`).
+- **Experimental**: Replaces the device model string across all occurrences in images (outside `SignerVer02`) with `--experimental-model-replace`.
+- **Experimental**: Generates a modified `AP_*.tar.md5` package instead of fastboot images with `--build-ap` (likely incompatible with Odin).
+- Skips excluded images (default: `recovery.img`).
+- Supports sparse images (`simg2img`, `img2simg`) and LZ4 compression.
+- Automatically detects and repacks `super.img` partitions using `lpunpack` and `lpmake`.
+- Generates output in `fastboot_images/` (default) or `modified_ap/` (with `--build-ap`).
 
 ## Requirements
-- **OS**: Artix Linux (or any Linux with `pacman` or equivalent package manager).
+
+- **Operating System**: Linux (e.g., Ubuntu, Artix Linux, or any distribution with required tools).
 - **Tools**:
-  - `android-tools` (includes `simg2img`, `lpunpack`, `lpmake`)
+  - `android-tools` (includes `simg2img`, `img2simg`, `lpunpack`, `lpmake`)
   - `lz4`
   - `python3`
   - `tar`
-  - `xz` (for decompressing `.xz` GSI images)
+  - `xz`
+  - `md5sum`
+  - `jq` (for JSON parsing)
 - **Hardware**:
   - 20GB free disk space (for `super.img` processing).
   - 16GB+ RAM recommended (for sparse image conversion).
 - **Firmware Files**:
-  - Source AP package (e.g., `AP_*.tar.md5` for OneUI 6.1, Android 14, SW REV 11) from [samfw.com](https://samfw.com/firmware/SM-F711B).
+  - Source AP package (e.g., `AP_F711BXXS8HXF2_*.tar.md5`) from [samfw.com](https://samfw.com).
   - Optional: GSI image (e.g., `system.img` or `system.img.xz`) for replacement.
-- **Device**: Samsung Galaxy Z Flip 3 with unlocked bootloader.
-- **Permissions**: Root access required for `mount`, `umount`, and other commands (script uses `sudo` automatically).
+  - Optional: Last image (e.g., `misc.bin.lz4`) for extracting `SignerVer02` and model.
+- **Device**:
+  - Samsung device with an unlocked bootloader (e.g., Galaxy Z Flip 3, SM-F711B).
+  - Recovery mode must support `fastbootd` (verify by booting into recovery and checking for `fastbootd` mode).
 
 ## Installation
-1. Install dependencies on Artix Linux:
+
+1. **Install dependencies** (example for Ubuntu):
    ```bash
-   sudo pacman -S android-tools lz4 python tar xz
+   sudo apt update
+   sudo apt install android-tools-adb android-tools-fastboot lz4 python3 tar xz-utils md5sum jq
+   ```
+   For Artix Linux (Arch-based):
+   ```bash
+   sudo pacman -S android-tools lz4 python tar xz jq
    ```
    If `android-tools` is unavailable, use AUR:
    ```bash
    yay -S android-tools
    ```
-2. Clone this repository:
+
+2. **Clone the repository**:
    ```bash
    git clone https://github.com/morosakubek2/sm_gsi_binary_rev_changer.git
    cd sm_gsi_binary_rev_changer
    ```
-3. Make the script executable:
+
+3. **Make scripts executable**:
    ```bash
-   chmod +x build-gsi.sh
-   ```
-4. Ensure loop module is loaded (required for mounting):
-   ```bash
-   sudo modprobe loop
+   chmod +x build_gsi_for_fastbootd.sh extract_params.py update_signer.py
    ```
 
 ## Usage
+
 1. **Prepare firmware**:
-   - Download the target AP package (e.g., `AP_*.tar.md5` for OneUI 6.1, Android 14, SW REV 11) from [samfw.com](https://samfw.com/firmware/SM-F711B).
-   - Optional: Place a GSI image (e.g., `system.img` or `system.img.xz`) in the same directory to replace the stock system.
+   - Download the source AP package (e.g., `AP_F711BXXS8HXF2_*.tar.md5`) from [samfw.com](https://samfw.com).
+   - Optional: Place a GSI image (e.g., `Voltage-A16_treble_arm64_bN.img.xz`) in the same directory.
+   - Optional: Provide a `--last-image` (e.g., `misc.bin.lz4`) to extract `SignerVer02` and the new model.
 
-2. **Run the script**:
+2. **Verify `fastbootd` support**:
+   - Boot your device into recovery mode (e.g., Vol Up + Power or via `adb reboot recovery`).
+   - Check if `fastbootd` is available (e.g., select "Enter fastboot" in recovery and run `fastboot devices` to confirm).
+   - If `fastbootd` is not supported, **do not proceed**, as flashing dynamic partitions will fail, risking a **hardbrick**.
+
+3. **Run the script**:
    ```bash
-   ./build-gsi.sh [options] <input_tar> [output_dir]
-   ```
-   - `-k/--keep-files`: Keep temporary files (default: delete).
-   - `-v/--verbose`: Enable verbose output for debugging.
-   - `-r <target_rev>`: Target binary revision (e.g., `0x0F` for SW REV 15, `0x0B` for SW REV 11).
-   - `-g <gsi_image>`: Optional GSI image to replace `system.img` (supports `.xz`).
-   - `<input_tar>`: Input `AP_*.tar.md5` file.
-   - `[output_dir]`: Output directory (default: `./out`).
-   Example (with GSI in .xz format):
-   ```bash
-   ./build-gsi.sh -r 0x0F -v -g system_gsi.img.xz AP_F711BXXU6EWK1.tar.md5 out
-   ```
-   Example (without GSI):
-   ```bash
-   ./build-gsi.sh -r 0x0F -v AP_F711BXXU6EWK1.tar.md5 out
-   ```
-   Example (keep temporary files):
-   ```bash
-   ./build-gsi.sh -k -r 0x0F -v AP_F711BXXU6EWK1.tar.md5 out
+   ./build_gsi_for_fastbootd.sh [options] <input_tar>
    ```
 
-3. **Output**:
-   - The script generates `out/AP_modified.tar`, containing:
-     - `super.img.lz4` (with GSI or stock `system.img` and modified rev for other partitions).
-     - `boot.img.lz4`, `vbmeta.img.lz4`, etc., with modified rev.
-   - Use Odin to flash `AP_modified.tar`.
+   **Options**:
+   - `-k`, `--keep-files`: Keep temporary files in `/tmp` for debugging (default: delete).
+   - `-v`, `--verbose`: Enable verbose output.
+   - `-m`, `--experimental-model-replace`: Enable experimental replacement of the device model (e.g., `F711BXXS8HXF2` to `F711BXXSFJYGB`) outside `SignerVer02`.
+   - `-b`, `--build-ap`: [EXPERIMENTAL] Generate a modified `AP_*.tar.md5` package instead of fastboot images (likely incompatible with Odin).
+   - `-g`, `--gsi <file>`: GSI image to replace `system.img` (supports `.xz`).
+   - `-l`, `--last-image <file>`: Image to extract `SignerVer02` and new model (e.g., `misc.bin.lz4`).
+   - `-o`, `--output <dir>`: Output directory (default: `./fastboot_images` or `./modified_ap` for `--build-ap`).
+   - `-e`, `--exclude <file>`: Exclude specific images from processing (default: `recovery.img`).
 
-4. **Flash the AP package**:
-   - Install Wine for Odin:
+   **Examples**:
+   - Generate fastboot images with GSI replacement:
      ```bash
-     sudo pacman -S wine
+     ./build_gsi_for_fastbootd.sh -v -g Voltage-A16_treble_arm64_bN.img.xz AP_F711BXXS8HXF2_F711BXXS8HXF2_MQB81265444_REV00_user_low_ship_MULTI_CERT_meta_OS14.tar.md5
      ```
-   - Download Odin from [samfw.com](https://samfw.com).
-   - Run Odin:
+     Output: `fastboot_images/` with `super.img`, `boot.img`, `vendor_boot.img`, etc.
+   - With experimental model replacement:
      ```bash
-     wine /path/to/odin.exe
+     ./build_gsi_for_fastbootd.sh -v -m -l misc.bin.lz4 -g Voltage-A16_treble_arm64_bN.img.xz AP_F711BXXS8HXF2_F711BXXS8HXF2_MQB81265444_REV00_user_low_ship_MULTI_CERT_meta_OS14.tar.md5
      ```
-   - Load:
-     - AP: `out/AP_modified.tar`
-     - CP: `CP_*.tar.md5` (from current firmware, e.g., OneUI 7, for updated modem)
-     - CSC: `CSC_*.tar.md5` (or `HOME_CSC_*.tar.md5` to preserve data, if possible)
-     - Skip BL to avoid downgrading the bootloader.
-   - Enter Download Mode (Vol Down + Power, connect USB, press Vol Up) and flash.
+     Output: `fastboot_images/` with updated `SignerVer02` and model (if `-m` is used).
+   - [EXPERIMENTAL] Generate modified AP package:
+     ```bash
+     ./build_gsi_for_fastbootd.sh -v -b -l misc.bin.lz4 -g Voltage-A16_treble_arm64_bN.img.xz AP_F711BXXS8HXF2_F711BXXS8HXF2_MQB81265444_REV00_user_low_ship_MULTI_CERT_meta_OS14.tar.md5
+     ```
+     Output: `modified_ap/AP_F711BXXSFJYGB_F711BXXSFJYGB_modified.tar.md5` (likely incompatible with Odin).
+
+4. **Flash the output**:
+   - **For fastboot images** (recommended):
+     - Boot your device into `fastbootd` mode (via recovery).
+     - Flash images:
+       ```bash
+       fastboot flash super fastboot_images/super.img
+       fastboot flash boot fastboot_images/boot.img
+       fastboot flash vendor_boot fastboot_images/vendor_boot.img
+       fastboot reboot
+       ```
+   - **For experimental AP package** (not recommended):
+     - Install Wine and Odin:
+       ```bash
+       sudo apt install wine
+       ```
+     - Download Odin from [samfw.com](https://samfw.com).
+     - Run Odin:
+       ```bash
+       wine /path/to/odin.exe
+       ```
+     - Load:
+       - AP: `modified_ap/AP_*.tar.md5`
+       - CP: `CP_*.tar.md5` (from current firmware for modem compatibility)
+       - CSC: `CSC_*.tar.md5` (or `HOME_CSC_*.tar.md5` to preserve data, if possible)
+       - Skip BL to avoid bootloader issues.
+     - Enter Download Mode (Vol Down + Power, connect USB, press Vol Up) and flash.
+     - **Warning**: The experimental AP package is likely incompatible with Odin, increasing the risk of bootloop or hardbrick.
 
 ## Notes
-- **Permissions**: The script uses `sudo` for commands requiring root (e.g., `mount`, `umount`). Ensure your user has sudo privileges:
+
+- **Educational Use Only**: This script is for learning purposes. Using it on a device can cause **bootloop** or **hardbrick**. Always verify `fastbootd` support in recovery before flashing.
+- **Temporary Files**: Use `-k` to preserve temporary files in `/tmp` for debugging. Check `/tmp/tmp.*` for logs and intermediate images.
+- **GSI Support**: Supports `.xz` compressed GSI images. The script decompresses them automatically.
+- **Partitions**: Automatically detects partitions in `super.img` (e.g., `system`, `vendor`, `product`, `odm`). Verify after unpacking:
   ```bash
-  sudo -l
+  ls fastboot_images/super
   ```
-- **Temporary Files**: Use `-k/--keep-files` to preserve temporary files in `/tmp` for debugging. Default: files are deleted.
-- **GSI Support**: Supports `.xz` compressed GSI images (e.g., `system.img.xz`). The script automatically decompresses them.
-- **Partitions**: Dynamically detects all partitions in `super.img` (e.g., `vendor`, `product`, `odm`). Check after unpacking:
-  ```bash
-  ls out/super
-  ```
-  Add custom partitions to the script if needed.
-- **Super Partition Size**: Automatically calculated based on partition sizes, no manual configuration required.
-- **Model String**: If the script cannot find the model string (e.g., `SM-F711B`), it will prompt for manual input. Hardcode it in `change_binary_rev` for automation.
-- **GSI**: `system.img` is assumed to be a GSI (or replaced via `-g`) and skipped for rev changes. For stock Samsung `system.img`, edit the script to include it in rev modification.
+- **Model String**: The script extracts the old model from the AP filename (e.g., `F711BXXS8HXF2`) and the new model from `--last-image`. If detection fails, check `params.json` in the temporary directory.
 - **Resources**:
   - Memory: ~20GB free disk space, 16GB+ RAM recommended.
   - Backup: Always keep original firmware and a full device backup.
-- **XDA Support**: Check [XDA forums](https://xdaforums.com) for Flip 3-specific issues (search "Flip 3 downgrade GSI rev").
+  - XDA Forums: Check XDA for device-specific issues (search "Flip 3 GSI fastbootd").
+- **Fastbootd Requirement**: Without `fastbootd` support in recovery, flashing dynamic partitions (e.g., `super.img`) will fail, risking a hardbrick. Verify with:
+  ```bash
+  fastboot devices
+  ```
+  after entering `fastbootd` mode.
 
 ## Troubleshooting
-- **Mount errors** (e.g., "Permission denied" for `product.img`):
-  - Ensure the loop module is loaded:
-    ```bash
-    sudo modprobe loop
-    ```
-  - Check loop device permissions:
-    ```bash
-    ls -l /dev/loop*
-    sudo chmod 666 /dev/loop*
-    ```
-  - Verify sudo privileges:
-    ```bash
-    sudo -l
-    ```
-  - Run with `-v` and `-k` to inspect logs and temporary files:
-    ```bash
-    ./build-gsi.sh -k -v -r 0x0F AP_F711BXXU6EWK1.tar.md5 out
-    ```
-  - Check filesystem integrity:
-    ```bash
-    sudo e2fsck -f -y /tmp/<temp_dir>/super/product.img
-    ```
-- **Tool errors**: Ensure all dependencies are installed (`xz` for `.xz` GSI images). If `android-tools` is missing, build from AUR or AOSP source.
-- **Model string not found**: Provide the full firmware string (e.g., `SM-F711BXXU6EWK1`) when prompted or hardcode in the script.
-- **Repack errors**: Verify partition sizes (`ls -l out/super/*.img`) and ensure sufficient disk space.
-- **Verbose logs**: Use `-v` for detailed output. Share full logs for support.
 
-## Credits
-- Original `build-gsi.sh`: [sandorex](https://gist.github.com/sandorex/031c006cc9f705c3640bad8d5b9d66d2)
-- Binary rev change logic: [BotchedRPR/binary-rev-change](https://github.com/BotchedRPR/binary-rev-change)
-- Adapted for Artix Linux and Flip 3 by [morosakubek2](https://github.com/morosakubek2).
+- **Fastbootd not accessible**:
+  - Ensure recovery supports `fastbootd` (e.g., TWRP or custom recovery with `fastbootd` support).
+  - Boot into recovery and select "Enter fastboot" or similar.
+  - Verify:
+    ```bash
+    fastboot devices
+    ```
+  - If unsupported, install a compatible recovery or avoid flashing.
+- **Sparse image errors** (e.g., "Invalid sparse file format"):
+  - Update `android-tools`:
+    ```bash
+    sudo apt install android-tools-adb android-tools-fastboot
+    ```
+  - Run with `-v` and `-k` to inspect temporary files:
+    ```bash
+    ./build_gsi_for_fastbootd.sh -k -v -g system.img.xz AP_F711BXXS8HXF2_*.tar.md5
+    ```
+  - Check temporary images:
+    ```bash
+    ls -l /tmp/tmp*/super*.img
+    ```
+- **Model not detected**:
+  - Verify `--last-image` contains a valid `SignerVer02` section:
+    ```bash
+    python3 extract_params.py misc.bin.lz4 --output-json params.json --output-signer signer_section.bin
+    ```
+  - Check `params.json` for `device_model`.
+- **Repack errors**:
+  - Verify partition sizes:
+    ```bash
+    ls -l fastboot_images/super/*.img
+    ```
+  - Ensure sufficient disk space:
+    ```bash
+    df -h
+    ```
+- **Verbose logs**:
+  - Use `-v` for detailed output and `-k` to keep temporary files. Share logs for support.
 
 ## License
+
 MIT License. See [LICENSE](LICENSE) for details.
+
+## About
+
+This project is a forkable tool for educational purposes, demonstrating firmware modification for Samsung devices with GSI integration and model/signer updates. It is not intended for production use due to the high risk of **bootloop** or **hardbrick**. Always ensure your recovery supports `fastbootd` before attempting to flash.
