@@ -18,7 +18,7 @@ GSI_IMAGE=""
 LAST_IMAGE=""
 OLD_MODEL=""
 MODEL=""
-EXCLUDE_FILES=("recovery.img")
+EXCLUDE_FILES=("vbmeta.img" "recovery.img")
 
 # Directories
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
