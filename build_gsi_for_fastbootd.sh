@@ -18,7 +18,7 @@ GSI_IMAGE=""
 LAST_IMAGE=""
 OLD_MODEL=""
 MODEL=""
-EXCLUDE_FILES=("recovery.img")
+EXCLUDE_FILES=("vbmeta.img" "recovery.img")
 
 # Directories
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
@@ -581,28 +581,37 @@ if [ $BUILD_AP -eq 1 ]; then
     OUTDIR="$WORKDIR/modified_ap"  # Update OUTDIR for final message
 fi
 
-echo "[+] SUCCESS: Output created in: $OUTDIR"
-
-if [ -n "$LAST_IMAGE" ]; then
-    echo "[+] Parameters extracted from: $LAST_IMAGE"
-    echo "[+] Applied new model: $MODEL"
+if [ -n "$GSI_IMAGE" ]; then
+    echo "[+] GSI image integrated successfully"
+else
+    echo "[+] No GSI image provided, original system.img retained"
 fi
 
-echo "[+] GSI image integrated successfully"
 echo ""
 echo "[+] Available output in $OUTDIR:"
 if [ $BUILD_AP -eq 1 ]; then
     echo "    $(basename "${ap_output}.md5")"
 else
+    # List all generated images with sizes
     for img_file in "$OUTDIR"/*.img; do
         [ ! -f "$img_file" ] && continue
         img_size=$(du -h "$img_file" | cut -f1)
         echo "    $(basename "$img_file") (${img_size})"
     done
     echo ""
-    echo "[+] Flash using fastboot commands, for example:"
-    echo "    fastboot flash super super.img"
-    echo "    fastboot flash boot boot.img"
-    echo "    fastboot flash vendor_boot vendor_boot.img"
-    echo "    fastboot reboot"
+    echo "[+] Flash using fastboot command:"
+    flash_cmd="fastboot flash"
+    for img_file in "$OUTDIR"/*.img; do
+        [ ! -f "$img_file" ] && continue
+        img_name=$(basename "$img_file")
+        # Map image names to fastboot partition names (e.g., misc.bin to misc)
+        partition_name="${img_name%.img}"
+        # Special case for misc.bin
+        if [ "$img_name" = "misc.bin" ]; then
+            partition_name="misc"
+        fi
+        flash_cmd="$flash_cmd $partition_name $img_name"
+    done
+    flash_cmd="$flash_cmd && fastboot reboot"
+    echo "    $flash_cmd"
 fi
